@@ -1,0 +1,20 @@
+{
+    "base_url": {
+        "description": "呆呆面板API地址",
+        "type": "string",
+        "hint": "例如：http://127.0.0.1:5700/api/v1",
+        "default": "http://127.0.0.1:5700/api/v1"
+    },
+    "app_key": {
+        "description": "呆呆面板的AppKey",
+        "type": "string",
+        "hint": "在呆呆面板后台 -> 系统设置 -> OpenAPI 中获取",
+        "default": ""
+    },
+    "app_secret": {
+        "description": "呆呆面板的AppSecret",
+        "type": "string",
+        "hint": "在呆呆面板后台 -> 系统设置 -> OpenAPI 中获取",
+        "default": ""
+    }
+}
