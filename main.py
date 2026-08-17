@@ -16,7 +16,7 @@ class KuwoManagerPlugin(Star):
 
     # ---------- 辅助方法：获取用户ID（兼容不同版本） ----------
     def _get_user_id(self, event: AstrMessageEvent) -> str:
-        """尝试多种方式获取用户ID，兼容 AstrBot 不同版本"""
+        """尝试多种方式获取用户ID"""
         if hasattr(event, 'get_user_id'):
             return event.get_user_id()
         if hasattr(event, 'get_sender_id'):
@@ -29,6 +29,24 @@ class KuwoManagerPlugin(Star):
             return event.get_session_id()
         logger.warning("无法获取用户ID，使用默认 'unknown'")
         return "unknown"
+
+    # ---------- 辅助方法：获取消息文本（兼容不同版本） ----------
+    def _get_text(self, event: AstrMessageEvent) -> str:
+        """尝试多种方式获取消息纯文本"""
+        if hasattr(event, 'get_plain_text'):
+            return event.get_plain_text().strip()
+        if hasattr(event, 'message_str'):
+            return event.message_str.strip()
+        if hasattr(event, 'message'):
+            # 如果 message 是对象，尝试转为字符串
+            msg = event.message
+            if hasattr(msg, 'get_plain_text'):
+                return msg.get_plain_text().strip()
+            return str(msg).strip()
+        if hasattr(event, 'raw_message'):
+            return event.raw_message.strip()
+        logger.warning("无法获取消息文本，返回空字符串")
+        return ""
 
     # ---------- 辅助方法：生成菜单文本 ----------
     def _get_menu_text(self, user_id: str) -> str:
@@ -63,7 +81,7 @@ class KuwoManagerPlugin(Star):
     async def handle_menu_choice(self, event: AstrMessageEvent):
         """处理主菜单的数字选择（1-4或q）"""
         user_id = self._get_user_id(event)
-        text = event.get_plain_text().strip().lower()
+        text = self._get_text(event).lower()
         state = self.user_state.get(user_id, 'idle')
         
         if state != 'idle':
@@ -100,7 +118,7 @@ class KuwoManagerPlugin(Star):
         if self.user_state.get(user_id) != 'waiting_phone':
             return
         
-        text = event.get_plain_text().strip()
+        text = self._get_text(event)
         phone, password = text.split('#', 1)
         
         if user_id not in self.user_data:
@@ -120,7 +138,13 @@ class KuwoManagerPlugin(Star):
         if self.user_state.get(user_id) != 'waiting_recharge':
             return
         
-        count = int(event.get_plain_text().strip())
+        text = self._get_text(event)
+        try:
+            count = int(text)
+        except ValueError:
+            yield event.plain_result("❌ 请输入有效的数字")
+            return
+        
         if count <= 0:
             yield event.plain_result("❌ 次数必须为正整数")
             return
@@ -141,7 +165,13 @@ class KuwoManagerPlugin(Star):
         if self.user_state.get(user_id) != 'waiting_withdraw':
             return
         
-        count = int(event.get_plain_text().strip())
+        text = self._get_text(event)
+        try:
+            count = int(text)
+        except ValueError:
+            yield event.plain_result("❌ 请输入有效的数字")
+            return
+        
         if count <= 0:
             yield event.plain_result("❌ 次数必须为正整数")
             return
