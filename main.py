@@ -7,7 +7,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 环境变量为主存储，本地文件为缓存，删除时按序号"""
+    """酷我账号管理 - 环境变量仅存储手机号#密码#授权次数，绑定关系存于本地文件"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -25,12 +25,12 @@ class KuwoManagerPlugin(Star):
         self.data_dir = os.path.join(os.path.dirname(__file__), "data")
         self.cache_file = os.path.join(self.data_dir, "user_data.json")
         os.makedirs(self.data_dir, exist_ok=True)
-        self.cache = self._load_cache()
+        self.cache = self._load_cache()  # {qq: {"accounts": [{"phone":, "password":}, ...], "count": 总次数}}
 
         # 用户交互状态
-        self.user_state = {}   # idle, waiting_phone, waiting_recharge, waiting_withdraw, waiting_delete
+        self.user_state = {}
 
-        logger.info("✅ 酷我插件（删除按序号）已加载")
+        logger.info("✅ 酷我插件（环境变量无QQ）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -123,8 +123,9 @@ class KuwoManagerPlugin(Star):
             result = await self._call_api(f"envs/{env_id}", method="PUT", data=payload)
         return result.get("code") in [0, None, ""] and not result.get("error")
 
-    # ---------- 环境变量账号读写（主存储） ----------
-    async def _get_all_accounts_from_env(self) -> list:
+    # ---------- 环境变量读写（无QQ） ----------
+    async def _get_all_env_entries(self) -> list:
+        """返回列表，每个元素 {'phone':, 'password':, 'auth_count':}"""
         value = ""
         env_id = await self._get_env_id_by_name(self.env_name)
         if env_id:
@@ -136,7 +137,7 @@ class KuwoManagerPlugin(Star):
         if not value:
             return []
         lines = value.split('\n')
-        accounts = []
+        entries = []
         for line in lines:
             line = line.strip()
             if not line:
@@ -145,42 +146,50 @@ class KuwoManagerPlugin(Star):
             if len(parts) >= 2:
                 phone = parts[0].strip()
                 password = parts[1].strip()
-                owner = parts[2].strip() if len(parts) >= 3 else ""
-                accounts.append({"phone": phone, "password": password, "owner": owner})
-        return accounts
+                auth_count = int(parts[2].strip()) if len(parts) >= 3 else 0
+                entries.append({"phone": phone, "password": password, "auth_count": auth_count})
+        return entries
 
-    async def _save_all_accounts_to_env(self, accounts: list) -> bool:
-        if not accounts:
+    async def _save_all_env_entries(self, entries: list) -> bool:
+        if not entries:
             new_value = ""
         else:
-            lines = []
-            for acc in accounts:
-                owner_part = f"#{acc['owner']}" if acc.get('owner') else ""
-                lines.append(f"{acc['phone']}#{acc['password']}{owner_part}")
+            lines = [f"{e['phone']}#{e['password']}#{e['auth_count']}" for e in entries]
             new_value = '\n'.join(lines)
         return await self._update_env_value(self.env_name, new_value)
 
-    # ---------- 获取当前用户的账号（缓存优先） ----------
+    # ---------- 获取当前用户的账号列表（从缓存） ----------
     async def _get_my_accounts(self, user_id: str) -> list:
         cache_user = self._get_cache_user(user_id)
-        if cache_user["accounts"]:
-            return cache_user["accounts"]
-        all_acc = await self._get_all_accounts_from_env()
-        my_acc = [acc for acc in all_acc if acc.get('owner') == user_id]
-        self._update_cache_user(user_id, my_acc, cache_user["count"])
-        return my_acc
+        return cache_user["accounts"]  # 返回 [{"phone":, "password":}, ...]
 
-    # ---------- 更新账号（提交/删除） ----------
-    async def _update_my_accounts(self, user_id: str, new_my_accounts: list, count: int = None):
-        all_acc = await self._get_all_accounts_from_env()
-        all_acc = [acc for acc in all_acc if acc.get('owner') != user_id]
-        all_acc.extend(new_my_accounts)
-        if await self._save_all_accounts_to_env(all_acc):
-            self._update_cache_user(user_id, new_my_accounts, count)
-            return True
+    # ---------- 检查手机号是否被其他用户占用 ----------
+    def _is_phone_owned_by_other(self, user_id: str, phone: str) -> bool:
+        for qq, data in self.cache.items():
+            if qq == user_id:
+                continue
+            for acc in data["accounts"]:
+                if acc["phone"] == phone:
+                    return True
         return False
 
-    # ---------- 辅助：获取用户ID和消息文本 ----------
+    # ---------- 更新环境变量中所有账号的授权次数（根据手机号列表） ----------
+    async def _sync_auth_counts_for_user(self, user_id: str, new_count: int):
+        """将缓存中该用户的所有手机号在环境变量中的 auth_count 更新为 new_count"""
+        cache_user = self._get_cache_user(user_id)
+        phones = [acc["phone"] for acc in cache_user["accounts"]]
+        if not phones:
+            return
+        env_entries = await self._get_all_env_entries()
+        updated = False
+        for entry in env_entries:
+            if entry["phone"] in phones:
+                entry["auth_count"] = new_count
+                updated = True
+        if updated:
+            await self._save_all_env_entries(env_entries)
+
+    # ---------- 辅助 ----------
     def _get_user_id(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_user_id'):
             return event.get_user_id()
@@ -208,7 +217,7 @@ class KuwoManagerPlugin(Star):
             return event.raw_message.strip()
         return ""
 
-    # ---------- 菜单生成 ----------
+    # ---------- 菜单 ----------
     async def _get_menu_text(self, user_id: str) -> str:
         my_acc = await self._get_my_accounts(user_id)
         count = len(my_acc)
@@ -224,7 +233,7 @@ class KuwoManagerPlugin(Star):
             "[q] 退出"
         )
 
-    # ---------- 命令处理 ----------
+    # ---------- 命令 ----------
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -251,7 +260,6 @@ class KuwoManagerPlugin(Star):
             if not my_acc:
                 yield event.plain_result("❌ 您没有绑定任何账号")
             else:
-                # 生成带编号的列表
                 lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
                 prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）："
                 yield event.plain_result(prompt)
@@ -277,31 +285,51 @@ class KuwoManagerPlugin(Star):
         phone = phone.strip()
         password = password.strip()
 
-        all_acc = await self._get_all_accounts_from_env()
-        my_acc = [acc for acc in all_acc if acc.get('owner') == user_id]
+        # 检查手机号是否已被其他用户占用
+        if self._is_phone_owned_by_other(user_id, phone):
+            yield event.plain_result(f"❌ 手机号 {phone} 已被其他用户绑定")
+            self.user_state[user_id] = 'idle'
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
+            return
+
+        # 获取当前用户的缓存
+        cache_user = self._get_cache_user(user_id)
+        my_acc = cache_user["accounts"]
+        # 检查是否已有该手机号（当前用户自己）
         found = None
         for acc in my_acc:
             if acc["phone"] == phone:
                 found = acc
                 break
         if found:
+            # 更新密码
             found["password"] = password
-            if await self._update_my_accounts(user_id, my_acc):
-                yield event.plain_result(f"✅ 账号 {phone} 密码已更新")
-            else:
-                yield event.plain_result("❌ 更新失败")
+            # 更新缓存
+            self._update_cache_user(user_id, my_acc, cache_user["count"])
+            # 更新环境变量中的密码
+            env_entries = await self._get_all_env_entries()
+            for entry in env_entries:
+                if entry["phone"] == phone:
+                    entry["password"] = password
+                    break
+            await self._save_all_env_entries(env_entries)
+            yield event.plain_result(f"✅ 账号 {phone} 密码已更新")
         else:
-            my_acc.append({"phone": phone, "password": password, "owner": user_id})
-            if await self._update_my_accounts(user_id, my_acc):
-                yield event.plain_result(f"✅ 账号 {phone} 已保存")
-            else:
-                yield event.plain_result("❌ 保存失败")
+            # 新增
+            my_acc.append({"phone": phone, "password": password})
+            self._update_cache_user(user_id, my_acc, cache_user["count"])
+            # 环境变量新增一行，授权次数为0
+            env_entries = await self._get_all_env_entries()
+            env_entries.append({"phone": phone, "password": password, "auth_count": 0})
+            await self._save_all_env_entries(env_entries)
+            yield event.plain_result(f"✅ 账号 {phone} 已保存")
 
         self.user_state[user_id] = 'idle'
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 删除账号（按序号） ----------
+    # ---------- 删除账号 ----------
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -317,7 +345,8 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(menu)
             return
 
-        my_acc = await self._get_my_accounts(user_id)
+        cache_user = self._get_cache_user(user_id)
+        my_acc = cache_user["accounts"]
         if index < 1 or index > len(my_acc):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(my_acc)} 之间的数字")
             self.user_state[user_id] = 'idle'
@@ -325,13 +354,16 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(menu)
             return
 
-        # 删除对应账号
-        removed = my_acc.pop(index - 1)
-        if await self._update_my_accounts(user_id, my_acc):
-            yield event.plain_result(f"✅ 已删除账号 {removed['phone']}")
-        else:
-            yield event.plain_result("❌ 删除失败")
+        phone_to_del = my_acc[index-1]["phone"]
+        # 从缓存中删除
+        del my_acc[index-1]
+        self._update_cache_user(user_id, my_acc, cache_user["count"])
+        # 从环境变量中删除该手机号
+        env_entries = await self._get_all_env_entries()
+        env_entries = [e for e in env_entries if e["phone"] != phone_to_del]
+        await self._save_all_env_entries(env_entries)
 
+        yield event.plain_result(f"✅ 已删除账号 {phone_to_del}")
         self.user_state[user_id] = 'idle'
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
@@ -353,9 +385,13 @@ class KuwoManagerPlugin(Star):
             return
 
         cache_user = self._get_cache_user(user_id)
-        cache_user["count"] += count
+        new_total = cache_user["count"] + count
+        cache_user["count"] = new_total
         self._save_cache()
-        yield event.plain_result(f"✅ 充值 {count} 次，当前可用：{cache_user['count']}")
+        # 同步环境变量中该用户所有账号的授权次数
+        await self._sync_auth_counts_for_user(user_id, new_total)
+
+        yield event.plain_result(f"✅ 充值 {count} 次，当前可用：{new_total}")
         self.user_state[user_id] = 'idle'
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
@@ -380,9 +416,11 @@ class KuwoManagerPlugin(Star):
         if cache_user["count"] < count:
             yield event.plain_result(f"❌ 可用次数不足！当前可用：{cache_user['count']}")
         else:
-            cache_user["count"] -= count
+            new_total = cache_user["count"] - count
+            cache_user["count"] = new_total
             self._save_cache()
-            yield event.plain_result(f"✅ 提现 {count} 次，剩余：{cache_user['count']}")
+            await self._sync_auth_counts_for_user(user_id, new_total)
+            yield event.plain_result(f"✅ 提现 {count} 次，剩余：{new_total}")
 
         self.user_state[user_id] = 'idle'
         menu = await self._get_menu_text(user_id)
