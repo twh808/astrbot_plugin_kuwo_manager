@@ -14,25 +14,46 @@ class KuwoManagerPlugin(Star):
         self.user_state = {}
         logger.info("✅ 酷我插件已加载")
 
+    # ---------- 辅助方法：获取用户ID（兼容不同版本） ----------
+    def _get_user_id(self, event: AstrMessageEvent) -> str:
+        """尝试多种方式获取用户ID，兼容 AstrBot 不同版本"""
+        # 方法1：如果有 get_user_id
+        if hasattr(event, 'get_user_id'):
+            return event.get_user_id()
+        # 方法2：如果有 get_sender_id（OneBot 适配器常用）
+        if hasattr(event, 'get_sender_id'):
+            return event.get_sender_id()
+        # 方法3：直接访问 message_obj 属性
+        if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'from_user_id'):
+            return str(event.message_obj.from_user_id)
+        # 方法4：尝试访问 sender_id 属性
+        if hasattr(event, 'sender_id'):
+            return event.sender_id
+        # 方法5：尝试 get_session_id（可能会返回群号，不推荐）
+        if hasattr(event, 'get_session_id'):
+            return event.get_session_id()
+        # 最后回退到使用事件对象的 id 属性（可能不可靠）
+        logger.warning("无法获取用户ID，使用默认 'unknown'")
+        return "unknown"
+
     # ---------- 主菜单命令 ----------
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         """显示酷我主菜单"""
-        user_id = event.get_user_id()
+        user_id = self._get_user_id(event)
         self.user_state[user_id] = 'idle'
         await self._show_menu(event, user_id)
 
-    # ---------- 处理后续输入 ----------
-    @filter.regex(r'^[1-4qQ]$')  # 匹配单字符选项
+    # ---------- 处理后续输入（使用正则匹配） ----------
+    @filter.regex(r'^[1-4qQ]$')
     async def handle_menu_choice(self, event: AstrMessageEvent):
         """处理主菜单的数字选择（1-4或q）"""
-        user_id = event.get_user_id()
+        user_id = self._get_user_id(event)
         text = event.get_plain_text().strip().lower()
         state = self.user_state.get(user_id, 'idle')
         
-        # 仅在空闲状态处理菜单选择
         if state != 'idle':
-            return  # 让其他处理器或状态机处理
+            return
 
         if text == '1':
             self.user_state[user_id] = 'waiting_phone'
@@ -57,17 +78,16 @@ class KuwoManagerPlugin(Star):
             await event.reply("无效选项，请重新选择")
 
     # ---------- 处理账号提交 ----------
-    @filter.regex(r'^\d{11}#.+$')  # 匹配手机号#密码格式
+    @filter.regex(r'^\d{11}#.+$')
     async def handle_phone_submit(self, event: AstrMessageEvent):
         """处理手机号#密码提交"""
-        user_id = event.get_user_id()
+        user_id = self._get_user_id(event)
         if self.user_state.get(user_id) != 'waiting_phone':
-            return  # 非等待状态忽略
+            return
         
         text = event.get_plain_text().strip()
         phone, password = text.split('#', 1)
         
-        # 存储或覆盖账号
         if user_id not in self.user_data:
             self.user_data[user_id] = {'count': 0}
         self.user_data[user_id]['phone'] = phone
@@ -78,10 +98,10 @@ class KuwoManagerPlugin(Star):
         await self._show_menu(event, user_id)
 
     # ---------- 处理充值 ----------
-    @filter.regex(r'^\d+$')  # 匹配纯数字
+    @filter.regex(r'^\d+$')
     async def handle_recharge(self, event: AstrMessageEvent):
         """处理充值次数"""
-        user_id = event.get_user_id()
+        user_id = self._get_user_id(event)
         if self.user_state.get(user_id) != 'waiting_recharge':
             return
         
@@ -102,7 +122,7 @@ class KuwoManagerPlugin(Star):
     @filter.regex(r'^\d+$')
     async def handle_withdraw(self, event: AstrMessageEvent):
         """处理提现次数"""
-        user_id = event.get_user_id()
+        user_id = self._get_user_id(event)
         if self.user_state.get(user_id) != 'waiting_withdraw':
             return
         
