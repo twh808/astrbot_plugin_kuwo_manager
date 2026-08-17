@@ -5,34 +5,40 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理插件 - 联动呆呆面板环境变量（kwtx）"""
+    """酷我账号管理插件 - 与呆呆面板环境变量联动（kwtx）"""
     
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         if config is None:
             config = {}
-        # 呆呆面板配置（与您的参考插件一致）
-        self.base_url = config.get("base_url", "http://127.0.0.1:5700/api/v1")
-        self.app_key = config.get("app_key", "")
-        self.app_secret = config.get("app_secret", "")
+        # 从 AstrBot 插件配置中读取呆呆面板参数
+        self.base_url = config.get("base_url", "").strip()
+        self.app_key = config.get("app_key", "").strip()
+        self.app_secret = config.get("app_secret", "").strip()
+        
+        # 检查配置是否完整
+        if not all([self.base_url, self.app_key, self.app_secret]):
+            logger.warning("⚠️ 呆呆面板配置不完整，请检查 base_url、app_key、app_secret 是否已填写")
+        else:
+            logger.info(f"✅ 呆呆面板配置已加载，base_url: {self.base_url}")
+        
         self.token = None
         self.token_expiry = 0
+        self.env_name = "kwtx"  # 固定环境变量名
         
-        # 环境变量名称
-        self.env_name = "kwtx"
-        
-        # 充值次数暂存内存（可根据需要持久化）
-        self.user_counts = {}   # {user_id: int}
-        # 用户状态
-        self.user_state = {}    # {user_id: 'idle'|'waiting_phone'|'waiting_recharge'|'waiting_withdraw'|'waiting_delete'}
+        # 充值次数暂存内存（如需持久化可扩展）
+        self.user_counts = {}
+        self.user_state = {}
         
         logger.info("✅ 酷我插件（呆呆面板联动版）已加载")
 
-    # ---------- 以下 API 方法复用自您的 DaidaiManagerPlugin ----------
+    # ---------- 呆呆面板 API（复用参考插件的实现） ----------
     async def _get_token(self):
-        """获取 access_token（与参考插件一致）"""
         if self.token and self.token_expiry > time.time():
             return self.token
+
+        if not self.base_url or not self.app_key or not self.app_secret:
+            raise Exception("呆呆面板配置不完整，无法获取 Token")
 
         base = self.base_url.replace("/api/v1", "").replace("/api", "")
         token_url = f"{base}/api/open-api/token"
@@ -53,7 +59,6 @@ class KuwoManagerPlugin(Star):
                 return token
 
     async def _call_api(self, endpoint: str, method: str = "POST", data: dict = None):
-        """通用 API 调用（与参考插件一致）"""
         token = await self._get_token()
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         headers = {
@@ -72,12 +77,10 @@ class KuwoManagerPlugin(Star):
                     return {"error": f"HTTP {resp.status}", "detail": await resp.text()}
 
     async def _fetch_env_list(self):
-        """获取所有环境变量"""
         result = await self._call_api("envs?page=1&page_size=100", method="GET")
         return result.get("data", [])
 
     async def _get_env_id_by_name(self, env_name: str) -> int:
-        """根据名称获取环境变量 ID"""
         envs = await self._fetch_env_list()
         for env in envs:
             if env.get("name") == env_name:
@@ -85,22 +88,18 @@ class KuwoManagerPlugin(Star):
         return None
 
     async def _update_env_value(self, env_name: str, new_value: str) -> bool:
-        """更新或创建环境变量（与参考插件 _set_env 逻辑类似）"""
         env_id = await self._get_env_id_by_name(env_name)
         if env_id is None:
-            # 创建
             payload = {"name": env_name, "value": new_value, "group": "默认分组"}
             result = await self._call_api("envs", method="POST", data=payload)
             return result.get("code") in [0, None, ""] and not result.get("error")
         else:
-            # 更新
             payload = {"name": env_name, "value": new_value}
             result = await self._call_api(f"envs/{env_id}", method="PUT", data=payload)
             return result.get("code") in [0, None, ""] and not result.get("error")
 
     # ---------- 账号读写 ----------
     async def _get_accounts(self) -> dict:
-        """从 kwtx 环境变量解析账号字典 {phone: password}"""
         value = ""
         env_id = await self._get_env_id_by_name(self.env_name)
         if env_id:
@@ -111,13 +110,11 @@ class KuwoManagerPlugin(Star):
                     break
         if not value:
             return {}
-        # 判断分隔符
         if '\n' in value:
             sep = '\n'
         elif '&' in value:
             sep = '&'
         else:
-            # 单账号
             if '#' in value:
                 phone, pwd = value.split('#', 1)
                 return {phone.strip(): pwd.strip()}
@@ -136,7 +133,6 @@ class KuwoManagerPlugin(Star):
         return accounts
 
     async def _save_accounts(self, accounts: dict) -> bool:
-        """将账号字典保存到 kwtx（以 & 分隔）"""
         if not accounts:
             new_value = ""
         else:
@@ -144,7 +140,7 @@ class KuwoManagerPlugin(Star):
             new_value = '&'.join(items)
         return await self._update_env_value(self.env_name, new_value)
 
-    # ---------- 辅助：获取用户ID和消息文本（兼容多种版本） ----------
+    # ---------- 辅助：获取用户ID和文本 ----------
     def _get_user_id(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_user_id'):
             return event.get_user_id()
@@ -172,10 +168,14 @@ class KuwoManagerPlugin(Star):
             return event.raw_message.strip()
         return ""
 
-    # ---------- 生成菜单 ----------
+    # ---------- 菜单 ----------
     async def _get_menu_text(self, user_id: str) -> str:
-        accounts = await self._get_accounts()
-        count = len(accounts)
+        try:
+            accounts = await self._get_accounts()
+            count = len(accounts)
+        except Exception as e:
+            logger.error(f"获取账号失败: {e}")
+            count = 0
         times = self.user_counts.get(user_id, 0)
         return (
             f"=====酷我=====\n"
@@ -187,7 +187,7 @@ class KuwoManagerPlugin(Star):
             "[q] 退出"
         )
 
-    # ---------- 命令处理 ----------
+    # ---------- 命令 ----------
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -210,13 +210,17 @@ class KuwoManagerPlugin(Star):
             self.user_state[user_id] = 'waiting_recharge'
             yield event.plain_result("请输入要充值的次数（数字）")
         elif text == '3':
-            accounts = await self._get_accounts()
-            if not accounts:
-                yield event.plain_result("❌ 当前没有账号")
-            else:
-                phone_list = list(accounts.keys())
-                yield event.plain_result(f"当前账号：{', '.join(phone_list)}\n请输入要删除的手机号：")
-                self.user_state[user_id] = 'waiting_delete'
+            try:
+                accounts = await self._get_accounts()
+                if not accounts:
+                    yield event.plain_result("❌ 当前没有账号")
+                else:
+                    phone_list = list(accounts.keys())
+                    yield event.plain_result(f"当前账号：{', '.join(phone_list)}\n请输入要删除的手机号：")
+                    self.user_state[user_id] = 'waiting_delete'
+            except Exception as e:
+                logger.error(f"获取账号列表失败: {e}")
+                yield event.plain_result("❌ 获取账号列表失败，请检查呆呆面板配置")
         elif text == '4':
             self.user_state[user_id] = 'waiting_withdraw'
             yield event.plain_result("请输入要提现的次数（数字）")
@@ -226,7 +230,6 @@ class KuwoManagerPlugin(Star):
         else:
             yield event.plain_result("无效选项")
 
-    # ---------- 提交账号 ----------
     @filter.regex(r'^\d{11}#.+$')
     async def handle_phone_submit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -235,19 +238,21 @@ class KuwoManagerPlugin(Star):
         
         text = self._get_text(event)
         phone, password = text.split('#', 1)
-        accounts = await self._get_accounts()
-        accounts[phone] = password  # 覆盖或新增
-        
-        if await self._save_accounts(accounts):
-            yield event.plain_result(f"✅ 账号 {phone} 已保存")
-        else:
-            yield event.plain_result("❌ 保存到环境变量失败")
+        try:
+            accounts = await self._get_accounts()
+            accounts[phone] = password
+            if await self._save_accounts(accounts):
+                yield event.plain_result(f"✅ 账号 {phone} 已保存")
+            else:
+                yield event.plain_result("❌ 保存到环境变量失败")
+        except Exception as e:
+            logger.error(f"提交账号失败: {e}")
+            yield event.plain_result("❌ 操作失败，请检查呆呆面板配置")
         
         self.user_state[user_id] = 'idle'
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 删除账号 ----------
     @filter.regex(r'^\d{11}$')
     async def handle_delete_phone(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -255,21 +260,24 @@ class KuwoManagerPlugin(Star):
             return
         
         phone = self._get_text(event)
-        accounts = await self._get_accounts()
-        if phone in accounts:
-            del accounts[phone]
-            if await self._save_accounts(accounts):
-                yield event.plain_result(f"✅ 已删除账号 {phone}")
+        try:
+            accounts = await self._get_accounts()
+            if phone in accounts:
+                del accounts[phone]
+                if await self._save_accounts(accounts):
+                    yield event.plain_result(f"✅ 已删除账号 {phone}")
+                else:
+                    yield event.plain_result("❌ 删除失败")
             else:
-                yield event.plain_result("❌ 删除失败")
-        else:
-            yield event.plain_result(f"❌ 未找到手机号 {phone}")
+                yield event.plain_result(f"❌ 未找到手机号 {phone}")
+        except Exception as e:
+            logger.error(f"删除账号失败: {e}")
+            yield event.plain_result("❌ 操作失败，请检查呆呆面板配置")
         
         self.user_state[user_id] = 'idle'
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 充值 ----------
     @filter.regex(r'^\d+$')
     async def handle_recharge(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -291,7 +299,6 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 提现 ----------
     @filter.regex(r'^\d+$')
     async def handle_withdraw(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
