@@ -5,11 +5,11 @@ version: 1.0.0
 repo: https://github.com/twh808/astrbot_plugin_kuwo_manager
 config:
   - name: base_url
-    desc: 呆呆面板API基础地址（例如 http://127.0.0.1:5700/api/v1）
+    desc: 呆呆面板API地址（例如 http://127.0.0.1:5700/api/v1）
     default: "http://127.0.0.1:5700/api/v1"
   - name: app_key
-    desc: 呆呆面板App Key
+    desc: 呆呆面板的AppKey，在呆呆面板后台->系统设置->OpenAPI中获取
     default: ""
   - name: app_secret
-    desc: 呆呆面板App Secret
+    desc: 呆呆面板的AppSecret，在呆呆面板后台->系统设置->OpenAPI中获取
     default: ""
