@@ -1,5 +1,5 @@
-name: astrbot_plugin_kuwo_manager # 插件名，需与仓库名一致
-desc: 一个用于管理酷我账号的插件
+name: astrbot_plugin_kuwo_manager
+desc: 酷我账号管理插件，支持提交、充值、删除、提现
 author: yixiuge
 version: 1.0.0
-# ... 其他配置项按需修改
+repo: https://github.com/twh808/astrbot_plugin_kuwo_manager
