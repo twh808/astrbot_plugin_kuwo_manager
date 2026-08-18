@@ -7,7 +7,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 支持授权次数查询"""
+    """酷我账号管理 - 支持管理员查看所有账户"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -20,6 +20,10 @@ class KuwoManagerPlugin(Star):
         self.token_expiry = 0
         self.env_name = "kwtx"
 
+        # 管理员QQ列表（从配置读取，逗号分隔）
+        admin_str = config.get("admin_qq", "").strip()
+        self.admin_qqs = [qq.strip() for qq in admin_str.split(',') if qq.strip()]
+
         # 全局数据存储
         self.data_dir = os.path.join(os.getcwd(), "data", "kuwo_data")
         self.cache_file = os.path.join(self.data_dir, "user_data.json")
@@ -30,7 +34,11 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（含授权次数查询）已加载")
+        logger.info("✅ 酷我插件（管理员功能）已加载")
+        if self.admin_qqs:
+            logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
+        else:
+            logger.warning("⚠️ 未配置管理员QQ，管理功能不可用")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -241,7 +249,7 @@ class KuwoManagerPlugin(Star):
             "[q] 退出"
         )
 
-    # ---------- 命令 ----------
+    # ---------- 普通用户命令 ----------
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -271,7 +279,6 @@ class KuwoManagerPlugin(Star):
                 yield event.plain_result(prompt)
                 self._set_state(user_id, 'waiting_delete', text)
         elif text == '3':
-            # 查询授权次数明细
             my_env_entries = await self._get_my_env_entries(user_id)
             if not my_env_entries:
                 yield event.plain_result("📭 您当前没有绑定任何账号，或账号尚未同步到环境变量。")
@@ -283,7 +290,6 @@ class KuwoManagerPlugin(Star):
                     total += entry['auth_count']
                 msg += f"合计可用次数：{total}"
                 yield event.plain_result(msg)
-            # 查询后返回菜单
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
         elif text == 'r':
@@ -384,3 +390,45 @@ class KuwoManagerPlugin(Star):
         self._set_state(user_id, 'idle')
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
+
+    # ---------- 管理员命令 ----------
+    @filter.command("管理查看")
+    async def admin_view_all(self, event: AstrMessageEvent):
+        """管理员查看所有用户绑定信息"""
+        user_id = self._get_user_id(event)
+        if user_id not in self.admin_qqs:
+            yield event.plain_result("❌ 你没有权限执行此操作")
+            return
+
+        # 获取所有环境变量条目（包含 auth_count）
+        all_env = await self._get_all_env_entries()
+        # 构建手机号到 auth_count 的映射
+        phone_to_auth = {entry["phone"]: entry["auth_count"] for entry in all_env}
+
+        if not self.cache:
+            yield event.plain_result("📭 暂无任何用户绑定数据")
+            return
+
+        msg = "📋 **所有用户绑定信息**\n"
+        msg += "（以下仅显示手机号和授权次数，密码已隐藏）\n\n"
+        total_users = 0
+        total_accounts = 0
+        for qq, data in self.cache.items():
+            accounts = data.get("accounts", [])
+            if not accounts:
+                continue
+            total_users += 1
+            total_accounts += len(accounts)
+            msg += f"👤 QQ: {qq}\n"
+            for acc in accounts:
+                phone = acc["phone"]
+                auth = phone_to_auth.get(phone, 0)
+                msg += f"  📱 {phone} ｜ 授权次数: {auth}\n"
+            msg += "\n"
+
+        if total_users == 0:
+            yield event.plain_result("📭 暂无任何用户绑定数据")
+            return
+
+        msg += f"统计：共 {total_users} 个用户，{total_accounts} 个绑定账号"
+        yield event.plain_result(msg)
