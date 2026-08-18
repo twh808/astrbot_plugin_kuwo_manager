@@ -7,7 +7,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 精简版（无充值）"""
+    """酷我账号管理 - 支持授权次数查询"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -20,17 +20,17 @@ class KuwoManagerPlugin(Star):
         self.token_expiry = 0
         self.env_name = "kwtx"
 
-        # 全局数据存储（确保热更新不丢失）
+        # 全局数据存储
         self.data_dir = os.path.join(os.getcwd(), "data", "kuwo_data")
         self.cache_file = os.path.join(self.data_dir, "user_data.json")
         os.makedirs(self.data_dir, exist_ok=True)
         self.cache = self._load_cache()
 
-        # 用户状态（仅用于提交和删除的顺序交互）
+        # 用户状态
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（精简版）已加载")
+        logger.info("✅ 酷我插件（含授权次数查询）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -236,6 +236,7 @@ class KuwoManagerPlugin(Star):
             f"账号{count}个，可用次数{total_auth}\n"
             "[1] 提交账号\n"
             "[2] 删除账号\n"
+            "[3] 查询授权次数明细\n"
             "[r] 重置我的所有数据\n"
             "[q] 退出"
         )
@@ -248,7 +249,7 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    @filter.regex(r'^[1-2rRqQ]$')
+    @filter.regex(r'^[1-3rRqQ]$')
     async def handle_menu_choice(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
@@ -269,6 +270,22 @@ class KuwoManagerPlugin(Star):
                 prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）："
                 yield event.plain_result(prompt)
                 self._set_state(user_id, 'waiting_delete', text)
+        elif text == '3':
+            # 查询授权次数明细
+            my_env_entries = await self._get_my_env_entries(user_id)
+            if not my_env_entries:
+                yield event.plain_result("📭 您当前没有绑定任何账号，或账号尚未同步到环境变量。")
+            else:
+                msg = "📋 您的账号授权次数明细：\n"
+                total = 0
+                for entry in my_env_entries:
+                    msg += f"手机号：{entry['phone']} ｜ 授权次数：{entry['auth_count']}\n"
+                    total += entry['auth_count']
+                msg += f"合计可用次数：{total}"
+                yield event.plain_result(msg)
+            # 查询后返回菜单
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
         elif text == 'r':
             await self._reset_user_data(user_id)
             yield event.plain_result("✅ 您的所有数据已重置")
