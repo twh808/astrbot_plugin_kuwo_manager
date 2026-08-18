@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 删除增加确认"""
+    """酷我账号管理 - 修复 trigger_msg 忽略机制"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（删除确认版）已加载")
+        logger.info("✅ 酷我插件（trigger_msg修复）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -543,6 +543,7 @@ class KuwoManagerPlugin(Star):
     # ---------- 管理员子操作（异步生成器） ----------
     async def _admin_bind_select_phone(self, event):
         user_id = self._get_user_id(event)
+        trigger_msg = self._get_text(event)
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号，请先让用户提交账号或手动添加")
@@ -565,7 +566,7 @@ class KuwoManagerPlugin(Star):
         for idx, entry in enumerate(unbound_phones, 1):
             msg += f"{idx}. {entry['phone']} ｜ 授权次数: {entry['auth_count']}\n"
         msg += "请选择要绑定的手机号序号："
-        self._set_state(user_id, 'admin_bind_wait_phone_select', admin_mode=True, tmp_data={'unbound_phones': unbound_phones})
+        self._set_state(user_id, 'admin_bind_wait_phone_select', trigger_msg=trigger_msg, admin_mode=True, tmp_data={'unbound_phones': unbound_phones})
         yield event.plain_result(msg)
 
     @filter.regex(r'^\d+$')
@@ -598,10 +599,10 @@ class KuwoManagerPlugin(Star):
                 acc_count = len(self.cache[qq].get("accounts", []))
                 msg += f"{i}. {qq} ｜ 账号数: {acc_count}\n"
             msg += f"请输入要绑定到该手机号的QQ序号（或直接输入新QQ号）："
-            self._set_state(user_id, 'admin_bind_wait_qq_select', admin_mode=True, tmp_data={'selected_phone': selected_phone, 'qq_list': qq_list})
+            self._set_state(user_id, 'admin_bind_wait_qq_select', trigger_msg=current_text, admin_mode=True, tmp_data={'selected_phone': selected_phone, 'qq_list': qq_list})
             yield event.plain_result(msg)
         else:
-            self._set_state(user_id, 'admin_bind_wait_qq_input', admin_mode=True, tmp_data={'selected_phone': selected_phone})
+            self._set_state(user_id, 'admin_bind_wait_qq_input', trigger_msg=current_text, admin_mode=True, tmp_data={'selected_phone': selected_phone})
             yield event.plain_result("当前无绑定记录，请输入要绑定的QQ号：")
 
     @filter.regex(r'^\d+$')
@@ -689,9 +690,10 @@ class KuwoManagerPlugin(Star):
             msg += f"\n⚠️ 注意：该手机号原本属于用户 {existing_owner}，已被管理员强制迁移至 {target_qq}"
         return msg
 
-    # ========== 删除账号（增加确认） ==========
+    # ========== 删除账号（已修复 trigger_msg） ==========
     async def _admin_delete_select(self, event):
         user_id = self._get_user_id(event)
+        trigger_msg = self._get_text(event)
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
@@ -712,7 +714,7 @@ class KuwoManagerPlugin(Star):
                     break
             msg += f"{idx}. {phone} ｜ 授权: {auth} ｜ 绑定QQ: {bound_qq}\n"
         msg += "请输入要删除的账号序号："
-        self._set_state(user_id, 'admin_delete_wait_select', admin_mode=True, tmp_data={'env_entries': env_entries})
+        self._set_state(user_id, 'admin_delete_wait_select', trigger_msg=trigger_msg, admin_mode=True, tmp_data={'env_entries': env_entries})
         yield event.plain_result(msg)
 
     @filter.regex(r'^\d+$')
@@ -737,7 +739,7 @@ class KuwoManagerPlugin(Star):
             return
         phone_to_del = env_entries[idx-1]["phone"]
         # 进入确认状态
-        self._set_state(user_id, 'admin_delete_wait_confirm', admin_mode=True, tmp_data={'phone_to_del': phone_to_del})
+        self._set_state(user_id, 'admin_delete_wait_confirm', trigger_msg=current_text, admin_mode=True, tmp_data={'phone_to_del': phone_to_del})
         yield event.plain_result(f"⚠️ 确认删除该账号（{phone_to_del}）吗？回复 `y` 确认，其他取消。")
 
     @filter.regex(r'^[yYnN]?$')
@@ -780,9 +782,10 @@ class KuwoManagerPlugin(Star):
         else:
             return f"✅ 已从环境变量删除手机号 {phone}（未发现绑定记录）"
 
-    # ========== 其他管理员子操作（不变，但为了完整保留） ==========
+    # ========== 修改授权次数（增加 trigger_msg） ==========
     async def _admin_auth_select(self, event):
         user_id = self._get_user_id(event)
+        trigger_msg = self._get_text(event)
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
@@ -793,7 +796,7 @@ class KuwoManagerPlugin(Star):
         for idx, entry in enumerate(env_entries, 1):
             msg += f"{idx}. {entry['phone']} ｜ 授权: {entry['auth_count']}\n"
         msg += "请输入要修改授权次数的账号序号："
-        self._set_state(user_id, 'admin_auth_wait_select', admin_mode=True, tmp_data={'env_entries': env_entries})
+        self._set_state(user_id, 'admin_auth_wait_select', trigger_msg=trigger_msg, admin_mode=True, tmp_data={'env_entries': env_entries})
         yield event.plain_result(msg)
 
     @filter.regex(r'^\d+$')
@@ -817,7 +820,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone = env_entries[idx-1]["phone"]
-        self._set_state(user_id, 'admin_auth_wait_delta', admin_mode=True, tmp_data={'phone': phone})
+        self._set_state(user_id, 'admin_auth_wait_delta', trigger_msg=current_text, admin_mode=True, tmp_data={'phone': phone})
         yield event.plain_result(f"已选择账号 {phone}，请输入要修改的差值（正数增加，负数减少）：")
 
     @filter.regex(r'^-?\d+$')
@@ -865,8 +868,10 @@ class KuwoManagerPlugin(Star):
         await self._save_all_env_entries(env_entries)
         return f"✅ 手机号 {phone} 授权次数已更新为 {new_count}（变动 {delta}）"
 
+    # ========== 提现审核（增加 trigger_msg） ==========
     async def _admin_withdraw_select(self, event):
         user_id = self._get_user_id(event)
+        trigger_msg = self._get_text(event)
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
@@ -877,7 +882,7 @@ class KuwoManagerPlugin(Star):
         for idx, entry in enumerate(env_entries, 1):
             msg += f"{idx}. {entry['phone']} ｜ 授权: {entry['auth_count']}\n"
         msg += "请输入要提现扣减的账号序号："
-        self._set_state(user_id, 'admin_withdraw_wait_select', admin_mode=True, tmp_data={'env_entries': env_entries})
+        self._set_state(user_id, 'admin_withdraw_wait_select', trigger_msg=trigger_msg, admin_mode=True, tmp_data={'env_entries': env_entries})
         yield event.plain_result(msg)
 
     @filter.regex(r'^\d+$')
@@ -901,7 +906,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone = env_entries[idx-1]["phone"]
-        self._set_state(user_id, 'admin_withdraw_wait_amount', admin_mode=True, tmp_data={'phone': phone})
+        self._set_state(user_id, 'admin_withdraw_wait_amount', trigger_msg=current_text, admin_mode=True, tmp_data={'phone': phone})
         yield event.plain_result(f"已选择账号 {phone}，请输入要提现扣减的数量（正整数）：")
 
     @filter.regex(r'^\d+$')
@@ -951,8 +956,10 @@ class KuwoManagerPlugin(Star):
         await self._save_all_env_entries(env_entries)
         return f"✅ 提现成功！手机号 {phone} 减少 {amount} 次，剩余 {entry_found['auth_count']}"
 
+    # ========== 重置用户（增加 trigger_msg） ==========
     async def _admin_reset_select(self, event):
         user_id = self._get_user_id(event)
+        trigger_msg = self._get_text(event)
         qq_list = [qq for qq, data in self.cache.items() if data.get("accounts")]
         if not qq_list:
             yield event.plain_result("📭 暂无任何用户绑定数据")
@@ -964,7 +971,7 @@ class KuwoManagerPlugin(Star):
             acc_count = len(self.cache[qq].get("accounts", []))
             msg += f"{idx}. {qq} ｜ 账号数: {acc_count}\n"
         msg += "请输入要重置的QQ序号："
-        self._set_state(user_id, 'admin_reset_wait_select', admin_mode=True, tmp_data={'qq_list': qq_list})
+        self._set_state(user_id, 'admin_reset_wait_select', trigger_msg=trigger_msg, admin_mode=True, tmp_data={'qq_list': qq_list})
         yield event.plain_result(msg)
 
     @filter.regex(r'^\d+$')
