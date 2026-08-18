@@ -7,7 +7,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 数据存储于AstrBot全局data目录，支持热更新"""
+    """酷我账号管理 - 全局数据存储，修复菜单冲突"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -20,16 +20,16 @@ class KuwoManagerPlugin(Star):
         self.token_expiry = 0
         self.env_name = "kwtx"
 
-        # 数据存储到 AstrBot 根目录的 data/kuwo_data/ 下，避免被插件更新覆盖
+        # 数据存储到 AstrBot 全局 data 目录
         self.data_dir = os.path.join(os.getcwd(), "data", "kuwo_data")
         self.cache_file = os.path.join(self.data_dir, "user_data.json")
         os.makedirs(self.data_dir, exist_ok=True)
         self.cache = self._load_cache()
 
-        self.state_info = {}  # user_id: {'state':, 'last_active':, 'trigger_msg':}
-        self.TIMEOUT = 120   # 状态超时时间（秒）
+        self.state_info = {}
+        self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（全局数据存储）已加载")
+        logger.info("✅ 酷我插件（全局数据存储，修复冲突）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -267,11 +267,12 @@ class KuwoManagerPlugin(Star):
     @filter.regex(r'^[1-4rRqQ]$')
     async def handle_menu_choice(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
-        text = self._get_text(event).lower()
         state_info = self._get_state_info(user_id)
+        # 如果当前不是空闲状态，静默忽略（不回复任何内容）
         if state_info['state'] != 'idle':
-            yield event.plain_result("⚠️ 请先完成当前操作，或等待超时重置。")
             return
+
+        text = self._get_text(event).lower()
 
         if text == '1':
             self._set_state(user_id, 'waiting_phone', text)
@@ -299,6 +300,9 @@ class KuwoManagerPlugin(Star):
         elif text == 'q':
             yield event.plain_result("👋 已退出菜单")
             self._set_state(user_id, 'idle')
+        else:
+            # 理论上不会走到这里，但保留
+            yield event.plain_result("无效选项")
 
     # ---------- 提交账号 ----------
     @filter.regex(r'^\d{11}#.+$')
@@ -357,6 +361,7 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'waiting_delete':
             return
         current_text = self._get_text(event)
+        # 忽略触发命令本身（例如用户刚发 '3' 后，'3' 也会匹配到数字正则，但我们要忽略）
         if state_info.get('trigger_msg') == current_text:
             return
 
