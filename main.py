@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 修复确认正则"""
+    """酷我账号管理 - 精确删除确认（y/Y 确认，其他取消）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -29,10 +29,11 @@ class KuwoManagerPlugin(Star):
         os.makedirs(self.data_dir, exist_ok=True)
         self.cache = self._load_cache()
 
-        self.state_info = {}
+        # 用户状态
+        self.state_info = {}  # user_id: {state, last_active, admin_mode, tmp_data}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（修复确认）已加载")
+        logger.info("✅ 酷我插件（精确删除确认）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -225,14 +226,12 @@ class KuwoManagerPlugin(Star):
             self.state_info[user_id] = {
                 'state': 'idle',
                 'last_active': now,
-                'trigger_msg': None,
                 'admin_mode': False,
                 'tmp_data': {}
             }
         info = self.state_info[user_id]
         if info['state'] != 'idle' and (now - info['last_active']) > self.TIMEOUT:
             info['state'] = 'idle'
-            info['trigger_msg'] = None
             info['admin_mode'] = False
             info['tmp_data'] = {}
             info['last_active'] = now
@@ -241,27 +240,18 @@ class KuwoManagerPlugin(Star):
             info['timeout'] = False
         return info
 
-    def _set_state(self, user_id: str, state: str, trigger_msg: str = None, admin_mode: bool = False, tmp_data: dict = None):
+    def _set_state(self, user_id: str, state: str, admin_mode: bool = False, tmp_data: dict = None):
         self.state_info[user_id] = {
             'state': state,
             'last_active': time.time(),
-            'trigger_msg': trigger_msg,
             'admin_mode': admin_mode,
             'tmp_data': tmp_data or {}
         }
-
-    def _reset_common_state(self, user_id: str):
-        info = self._get_state_info(user_id)
-        if info['state'] != 'idle':
-            info['state'] = 'idle'
-            info['trigger_msg'] = None
-            info['tmp_data'] = {}
 
     def _reset_admin_state(self, user_id: str):
         info = self._get_state_info(user_id)
         if info['state'] != 'idle':
             info['state'] = 'idle'
-            info['trigger_msg'] = None
             info['tmp_data'] = {}
 
     # ---------- 普通用户菜单 ----------
@@ -286,7 +276,7 @@ class KuwoManagerPlugin(Star):
         if info.get('admin_mode', False):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
-        self._reset_common_state(user_id)
+        self._reset_admin_state(user_id)
         self._set_state(user_id, 'idle', admin_mode=False)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
@@ -303,7 +293,7 @@ class KuwoManagerPlugin(Star):
         text = self._get_text(event).lower()
 
         if text == '1':
-            self._set_state(user_id, 'waiting_phone', text, admin_mode=False)
+            self._set_state(user_id, 'waiting_phone', admin_mode=False)
             yield event.plain_result("请输入手机号#密码（例如：13800138000#mypassword）")
         elif text == '2':
             my_acc = await self._get_my_accounts(user_id)
@@ -313,7 +303,7 @@ class KuwoManagerPlugin(Star):
                 lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
                 prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）："
                 yield event.plain_result(prompt)
-                self._set_state(user_id, 'waiting_delete', text, admin_mode=False)
+                self._set_state(user_id, 'waiting_delete', admin_mode=False)
         elif text == '3':
             my_env_entries = await self._get_my_env_entries(user_id)
             if not my_env_entries:
@@ -394,9 +384,6 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'waiting_delete':
             return
         current_text = self._get_text(event)
-        if state_info.get('trigger_msg') == current_text:
-            return
-
         try:
             idx = int(current_text)
         except:
@@ -427,7 +414,7 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 管理员交互式菜单 ----------
+    # ---------- 管理员交互 ----------
     async def _get_admin_menu_text(self) -> str:
         return (
             "=====管理面板=====\n"
@@ -466,7 +453,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
 
-    # ---------- 统一数字处理器 ----------
+    # ---------- 唯一数字入口 ----------
     @filter.regex(r'^\d+$')
     async def handle_admin_digit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -484,6 +471,7 @@ class KuwoManagerPlugin(Star):
 
         current_state = state_info['state']
 
+        # 菜单选择（空闲状态）
         if current_state == 'idle':
             if num == 1:
                 result = await self._admin_view_all_bindings()
@@ -518,7 +506,7 @@ class KuwoManagerPlugin(Star):
             else:
                 yield event.plain_result("❌ 无效选项，请输入 1-7 或 q")
         else:
-            # 子状态处理
+            # 子状态：转发给对应的子处理函数
             if current_state == 'admin_bind_wait_phone_select':
                 async for msg in self._admin_bind_phone_select_handle(event):
                     yield msg
@@ -604,8 +592,6 @@ class KuwoManagerPlugin(Star):
 
     async def _admin_bind_phone_select_handle(self, event):
         user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
-            return
         state_info = self._get_state_info(user_id)
         if state_info['state'] != 'admin_bind_wait_phone_select':
             return
@@ -741,8 +727,6 @@ class KuwoManagerPlugin(Star):
 
     async def _admin_delete_select_handle(self, event):
         user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
-            return
         state_info = self._get_state_info(user_id)
         if state_info['state'] != 'admin_delete_wait_select':
             return
@@ -757,10 +741,12 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone_to_del = env_entries[idx-1]["phone"]
+        # 进入确认状态
         self._set_state(user_id, 'admin_delete_wait_confirm', admin_mode=True, tmp_data={'phone_to_del': phone_to_del})
-        yield event.plain_result(f"⚠️ 确认删除该账号（{phone_to_del}）吗？回复 `y` 确认，其他取消。")
+        yield event.plain_result(f"⚠️ 确认删除该账号（{phone_to_del}）吗？回复 y 确认，其他取消。")
 
-    @filter.regex(r'^[yYnN]$')
+    # ---------- 确认删除（只匹配 y/Y） ----------
+    @filter.regex(r'^[yY]$')
     async def handle_admin_delete_confirm(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
@@ -768,21 +754,32 @@ class KuwoManagerPlugin(Star):
         state_info = self._get_state_info(user_id)
         if state_info['state'] != 'admin_delete_wait_confirm':
             return
-        current_text = self._get_text(event).lower()
-        if not current_text:
-            return
-        if current_text == 'y':
-            phone_to_del = state_info.get('tmp_data', {}).get('phone_to_del')
-            if not phone_to_del:
-                yield event.plain_result("❌ 会话错误，请重新操作")
-            else:
-                result = await self._admin_do_delete(phone_to_del)
-                yield event.plain_result(result)
+        phone_to_del = state_info.get('tmp_data', {}).get('phone_to_del')
+        if not phone_to_del:
+            yield event.plain_result("❌ 会话错误，请重新操作")
         else:
-            yield event.plain_result("❌ 已取消删除操作")
+            result = await self._admin_do_delete(phone_to_del)
+            yield event.plain_result(result)
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
+
+    # ---------- 所有其他消息：取消删除 ----------
+    @filter.regex(r'^(?!y$|Y$).*$')
+    async def handle_admin_delete_cancel(self, event: AstrMessageEvent):
+        """
+        当处于确认删除状态时，任何非 y/Y 的消息都视为取消。
+        此处理器使用负向先行断言，确保不会匹配 y/Y。
+        """
+        user_id = self._get_user_id(event)
+        if user_id not in self.admin_qqs:
+            return
+        state_info = self._get_state_info(user_id)
+        if state_info['state'] == 'admin_delete_wait_confirm':
+            yield event.plain_result("❌ 已取消删除操作")
+            self._set_state(user_id, 'idle', admin_mode=True)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
 
     async def _admin_do_delete(self, phone: str) -> str:
         deleted = False
@@ -820,8 +817,6 @@ class KuwoManagerPlugin(Star):
 
     async def _admin_auth_select_handle(self, event):
         user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
-            return
         state_info = self._get_state_info(user_id)
         if state_info['state'] != 'admin_auth_wait_select':
             return
@@ -900,8 +895,6 @@ class KuwoManagerPlugin(Star):
 
     async def _admin_withdraw_select_handle(self, event):
         user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
-            return
         state_info = self._get_state_info(user_id)
         if state_info['state'] != 'admin_withdraw_wait_select':
             return
@@ -983,8 +976,6 @@ class KuwoManagerPlugin(Star):
 
     async def _admin_reset_select_handle(self, event):
         user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
-            return
         state_info = self._get_state_info(user_id)
         if state_info['state'] != 'admin_reset_wait_select':
             return
