@@ -16,5 +16,11 @@
         "type": "string",
         "hint": "在呆呆面板后台 -> 系统设置 -> OpenAPI 中获取",
         "default": ""
+    },
+    "admin_qq": {
+        "description": "管理员QQ号（多个用英文逗号分隔）",
+        "type": "string",
+        "hint": "例如：123456789,987654321",
+        "default": ""
     }
 }
