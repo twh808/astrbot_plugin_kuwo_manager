@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 管理员列表选择（修复异步生成器）"""
+    """酷我账号管理 - 角色切换自动结束旧交互，超时120秒"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -30,9 +30,9 @@ class KuwoManagerPlugin(Star):
         self.cache = self._load_cache()
 
         self.state_info = {}
-        self.TIMEOUT = 120
+        self.TIMEOUT = 120  # 秒
 
-        logger.info("✅ 酷我插件（管理员列表选择修复版）已加载")
+        logger.info("✅ 酷我插件（角色切换自动结束旧交互）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -222,13 +222,24 @@ class KuwoManagerPlugin(Star):
     def _get_state_info(self, user_id: str) -> dict:
         now = time.time()
         if user_id not in self.state_info:
-            self.state_info[user_id] = {'state': 'idle', 'last_active': now, 'trigger_msg': None, 'admin_mode': False, 'tmp_data': {}}
+            self.state_info[user_id] = {
+                'state': 'idle',
+                'last_active': now,
+                'trigger_msg': None,
+                'admin_mode': False,
+                'tmp_data': {}
+            }
         info = self.state_info[user_id]
         if info['state'] != 'idle' and (now - info['last_active']) > self.TIMEOUT:
+            # 超时重置
             info['state'] = 'idle'
             info['trigger_msg'] = None
             info['admin_mode'] = False
             info['tmp_data'] = {}
+            info['last_active'] = now
+            info['timeout'] = True
+        else:
+            info['timeout'] = False
         return info
 
     def _set_state(self, user_id: str, state: str, trigger_msg: str = None, admin_mode: bool = False, tmp_data: dict = None):
@@ -239,6 +250,22 @@ class KuwoManagerPlugin(Star):
             'admin_mode': admin_mode,
             'tmp_data': tmp_data or {}
         }
+
+    def _reset_common_state(self, user_id: str):
+        """重置普通用户交互状态（保留admin_mode）"""
+        info = self._get_state_info(user_id)
+        if info['state'] != 'idle':
+            info['state'] = 'idle'
+            info['trigger_msg'] = None
+            info['tmp_data'] = {}
+
+    def _reset_admin_state(self, user_id: str):
+        """重置管理员交互状态（保留非admin_mode）"""
+        info = self._get_state_info(user_id)
+        if info['state'] != 'idle':
+            info['state'] = 'idle'
+            info['trigger_msg'] = None
+            info['tmp_data'] = {}
 
     # ---------- 普通用户菜单 ----------
     async def _get_menu_text(self, user_id: str) -> str:
@@ -258,6 +285,13 @@ class KuwoManagerPlugin(Star):
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
+        # 如果处于管理员模式，先退出管理员交互
+        info = self._get_state_info(user_id)
+        if info.get('admin_mode', False):
+            yield event.plain_result("👋 已退出管理面板")
+            self._set_state(user_id, 'idle', admin_mode=False)
+        # 重置普通用户状态（确保空闲）
+        self._reset_common_state(user_id)
         self._set_state(user_id, 'idle', admin_mode=False)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
@@ -418,6 +452,13 @@ class KuwoManagerPlugin(Star):
         if user_id not in self.admin_qqs:
             yield event.plain_result("❌ 你没有权限执行此操作")
             return
+        # 如果处于普通用户交互状态，先退出
+        info = self._get_state_info(user_id)
+        if info['state'] != 'idle' and not info.get('admin_mode', False):
+            yield event.plain_result("👋 已退出普通用户菜单")
+            self._set_state(user_id, 'idle', admin_mode=False)
+        # 重置管理员状态（确保空闲）
+        self._reset_admin_state(user_id)
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
@@ -469,6 +510,9 @@ class KuwoManagerPlugin(Star):
             return
         state_info = self._get_state_info(user_id)
         if not state_info.get('admin_mode', False):
+            # 如果管理员模式被超时或其他原因关闭，提示并退出
+            if state_info.get('timeout', False):
+                yield event.plain_result("⏰ 管理面板已超时退出，请重新发送「管理」")
             return
         if state_info['state'] != 'idle':
             return
@@ -506,7 +550,6 @@ class KuwoManagerPlugin(Star):
 
     # ---------- 管理员子操作（异步生成器） ----------
     async def _admin_bind_select_phone(self, event):
-        """绑定账号：先选择未绑定的手机号"""
         user_id = self._get_user_id(event)
         env_entries = await self._get_all_env_entries()
         if not env_entries:
@@ -597,7 +640,8 @@ class KuwoManagerPlugin(Star):
                 yield event.plain_result("❌ QQ号须为数字")
                 return
 
-        await self._admin_do_bind(target_qq, selected_phone, event)
+        result = await self._admin_do_bind(target_qq, selected_phone)
+        yield event.plain_result(result)
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
@@ -625,12 +669,13 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
-        await self._admin_do_bind(target_qq, selected_phone, event)
+        result = await self._admin_do_bind(target_qq, selected_phone)
+        yield event.plain_result(result)
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
 
-    async def _admin_do_bind(self, target_qq: str, phone: str, event):
+    async def _admin_do_bind(self, target_qq: str, phone: str) -> str:
         existing_owner = None
         for qq, data in self.cache.items():
             for acc in data["accounts"]:
@@ -643,15 +688,14 @@ class KuwoManagerPlugin(Star):
         accounts = target_cache["accounts"]
         for acc in accounts:
             if acc["phone"] == phone:
-                yield event.plain_result(f"⚠️ 用户 {target_qq} 已绑定该手机号")
-                return
+                return f"⚠️ 用户 {target_qq} 已绑定该手机号"
         password = "admin_placeholder"
         accounts.append({"phone": phone, "password": password})
         self._update_cache_user(target_qq, accounts)
         msg = f"✅ 已为用户 {target_qq} 绑定手机号 {phone}"
         if existing_owner and existing_owner != target_qq:
             msg += f"\n⚠️ 注意：该手机号原本属于用户 {existing_owner}，已被管理员强制迁移至 {target_qq}"
-        yield event.plain_result(msg)
+        return msg
 
     async def _admin_delete_select(self, event):
         user_id = self._get_user_id(event)
@@ -699,12 +743,13 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone_to_del = env_entries[idx-1]["phone"]
-        await self._admin_do_delete(phone_to_del, event)
+        result = await self._admin_do_delete(phone_to_del)
+        yield event.plain_result(result)
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
 
-    async def _admin_do_delete(self, phone: str, event):
+    async def _admin_do_delete(self, phone: str) -> str:
         deleted = False
         for qq, data in self.cache.items():
             accounts = data["accounts"]
@@ -718,9 +763,9 @@ class KuwoManagerPlugin(Star):
         env_entries = [e for e in env_entries if e["phone"] != phone]
         await self._save_all_env_entries(env_entries)
         if deleted:
-            yield event.plain_result(f"✅ 已删除手机号 {phone}（从所有绑定和环境变量中移除）")
+            return f"✅ 已删除手机号 {phone}（从所有绑定和环境变量中移除）"
         else:
-            yield event.plain_result(f"✅ 已从环境变量删除手机号 {phone}（未发现绑定记录）")
+            return f"✅ 已从环境变量删除手机号 {phone}（未发现绑定记录）"
 
     async def _admin_auth_select(self, event):
         user_id = self._get_user_id(event)
@@ -784,12 +829,13 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
-        await self._admin_do_auth(phone, delta, event)
+        result = await self._admin_do_auth(phone, delta)
+        yield event.plain_result(result)
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
 
-    async def _admin_do_auth(self, phone: str, delta: int, event):
+    async def _admin_do_auth(self, phone: str, delta: int) -> str:
         env_entries = await self._get_all_env_entries()
         entry_found = None
         for entry in env_entries:
@@ -797,15 +843,13 @@ class KuwoManagerPlugin(Star):
                 entry_found = entry
                 break
         if not entry_found:
-            yield event.plain_result(f"❌ 手机号 {phone} 不存在于环境变量中")
-            return
+            return f"❌ 手机号 {phone} 不存在于环境变量中"
         new_count = entry_found["auth_count"] + delta
         if new_count < 0:
-            yield event.plain_result(f"❌ 授权次数不能为负数，当前 {entry_found['auth_count']}，变化 {delta}")
-            return
+            return f"❌ 授权次数不能为负数，当前 {entry_found['auth_count']}，变化 {delta}"
         entry_found["auth_count"] = new_count
         await self._save_all_env_entries(env_entries)
-        yield event.plain_result(f"✅ 手机号 {phone} 授权次数已更新为 {new_count}（变动 {delta}）")
+        return f"✅ 手机号 {phone} 授权次数已更新为 {new_count}（变动 {delta}）"
 
     async def _admin_withdraw_select(self, event):
         user_id = self._get_user_id(event)
@@ -872,12 +916,13 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
-        await self._admin_do_withdraw(phone, amount, event)
+        result = await self._admin_do_withdraw(phone, amount)
+        yield event.plain_result(result)
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
 
-    async def _admin_do_withdraw(self, phone: str, amount: int, event):
+    async def _admin_do_withdraw(self, phone: str, amount: int) -> str:
         env_entries = await self._get_all_env_entries()
         entry_found = None
         for entry in env_entries:
@@ -885,14 +930,12 @@ class KuwoManagerPlugin(Star):
                 entry_found = entry
                 break
         if not entry_found:
-            yield event.plain_result(f"❌ 手机号 {phone} 不存在于环境变量中")
-            return
+            return f"❌ 手机号 {phone} 不存在于环境变量中"
         if entry_found["auth_count"] < amount:
-            yield event.plain_result(f"❌ 授权次数不足！当前 {entry_found['auth_count']}，需扣减 {amount}")
-            return
+            return f"❌ 授权次数不足！当前 {entry_found['auth_count']}，需扣减 {amount}"
         entry_found["auth_count"] -= amount
         await self._save_all_env_entries(env_entries)
-        yield event.plain_result(f"✅ 提现成功！手机号 {phone} 减少 {amount} 次，剩余 {entry_found['auth_count']}")
+        return f"✅ 提现成功！手机号 {phone} 减少 {amount} 次，剩余 {entry_found['auth_count']}"
 
     async def _admin_reset_select(self, event):
         user_id = self._get_user_id(event)
