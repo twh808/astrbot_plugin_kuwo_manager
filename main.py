@@ -7,7 +7,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 环境变量无QQ，绑定关系存于本地，状态机交互"""
+    """酷我账号管理 - 修复命令与数字冲突"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -25,11 +25,10 @@ class KuwoManagerPlugin(Star):
         os.makedirs(self.data_dir, exist_ok=True)
         self.cache = self._load_cache()
 
-        # 用户状态：state, last_active
-        self.user_state = {}   # user_id: {'state': 'idle', 'last_active': time.time()}
-        self.TIMEOUT = 120  # 2分钟超时
+        self.state_info = {}   # user_id: {'state':, 'last_active':, 'trigger_msg':}
+        self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（状态机+重置）已加载")
+        logger.info("✅ 酷我插件（修复命令冲突）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -155,10 +154,9 @@ class KuwoManagerPlugin(Star):
             new_value = '\n'.join(lines)
         return await self._update_env_value(self.env_name, new_value)
 
-    # ---------- 当前用户账号（从缓存） ----------
+    # ---------- 当前用户账号 ----------
     async def _get_my_accounts(self, user_id: str) -> list:
-        cache_user = self._get_cache_user(user_id)
-        return cache_user["accounts"]
+        return self._get_cache_user(user_id)["accounts"]
 
     def _is_phone_owned_by_other(self, user_id: str, phone: str) -> bool:
         for qq, data in self.cache.items():
@@ -183,22 +181,18 @@ class KuwoManagerPlugin(Star):
         if updated:
             await self._save_all_env_entries(env_entries)
 
-    # ---------- 重置用户数据 ----------
     async def _reset_user_data(self, user_id: str) -> bool:
-        """清空缓存中该用户的所有账号和次数，并从环境变量中删除对应手机号"""
         cache_user = self._get_cache_user(user_id)
         phones = [acc["phone"] for acc in cache_user["accounts"]]
-        # 清空缓存
         self.cache[user_id] = {"accounts": [], "count": 0}
         self._save_cache()
-        # 从环境变量中删除这些手机号
         if phones:
             env_entries = await self._get_all_env_entries()
             env_entries = [e for e in env_entries if e["phone"] not in phones]
             await self._save_all_env_entries(env_entries)
         return True
 
-    # ---------- 辅助：获取用户ID和消息文本 ----------
+    # ---------- 辅助 ----------
     def _get_user_id(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_user_id'):
             return event.get_user_id()
@@ -227,21 +221,22 @@ class KuwoManagerPlugin(Star):
         return ""
 
     # ---------- 状态管理 ----------
-    def _get_state(self, user_id: str) -> str:
-        """获取用户当前状态，若超时则自动重置为 idle"""
+    def _get_state_info(self, user_id: str) -> dict:
         now = time.time()
-        if user_id in self.user_state:
-            state_info = self.user_state[user_id]
-            if state_info.get('state', 'idle') != 'idle' and (now - state_info.get('last_active', now)) > self.TIMEOUT:
-                self.user_state[user_id] = {'state': 'idle', 'last_active': now}
-                return 'idle'
-            return state_info.get('state', 'idle')
-        else:
-            self.user_state[user_id] = {'state': 'idle', 'last_active': now}
-            return 'idle'
+        if user_id not in self.state_info:
+            self.state_info[user_id] = {'state': 'idle', 'last_active': now, 'trigger_msg': None}
+        info = self.state_info[user_id]
+        if info['state'] != 'idle' and (now - info['last_active']) > self.TIMEOUT:
+            info['state'] = 'idle'
+            info['trigger_msg'] = None
+        return info
 
-    def _set_state(self, user_id: str, state: str):
-        self.user_state[user_id] = {'state': state, 'last_active': time.time()}
+    def _set_state(self, user_id: str, state: str, trigger_msg: str = None):
+        self.state_info[user_id] = {
+            'state': state,
+            'last_active': time.time(),
+            'trigger_msg': trigger_msg
+        }
 
     # ---------- 菜单 ----------
     async def _get_menu_text(self, user_id: str) -> str:
@@ -272,17 +267,16 @@ class KuwoManagerPlugin(Star):
     async def handle_menu_choice(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
         text = self._get_text(event).lower()
-        state = self._get_state(user_id)
-        if state != 'idle':
-            # 如果当前有状态，忽略菜单选项，提示先完成当前操作
-            yield event.plain_result("⚠️ 请先完成当前操作（输入相应内容），或等待超时自动重置。")
+        state_info = self._get_state_info(user_id)
+        if state_info['state'] != 'idle':
+            yield event.plain_result("⚠️ 请先完成当前操作，或等待超时重置。")
             return
 
         if text == '1':
-            self._set_state(user_id, 'waiting_phone')
+            self._set_state(user_id, 'waiting_phone', text)
             yield event.plain_result("请输入手机号#密码（例如：13800138000#mypassword）")
         elif text == '2':
-            self._set_state(user_id, 'waiting_recharge')
+            self._set_state(user_id, 'waiting_recharge', text)
             yield event.plain_result("请输入要充值的次数（数字）")
         elif text == '3':
             my_acc = await self._get_my_accounts(user_id)
@@ -292,28 +286,26 @@ class KuwoManagerPlugin(Star):
                 lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
                 prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）："
                 yield event.plain_result(prompt)
-                self._set_state(user_id, 'waiting_delete')
+                self._set_state(user_id, 'waiting_delete', text)
         elif text == '4':
-            self._set_state(user_id, 'waiting_withdraw')
+            self._set_state(user_id, 'waiting_withdraw', text)
             yield event.plain_result("请输入要提现的次数（数字）")
         elif text == 'r':
             await self._reset_user_data(user_id)
-            yield event.plain_result("✅ 您的所有数据已重置（账号和次数已清空）")
+            yield event.plain_result("✅ 您的所有数据已重置")
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
         elif text == 'q':
             yield event.plain_result("👋 已退出菜单")
             self._set_state(user_id, 'idle')
-        else:
-            yield event.plain_result("无效选项，请重新选择")
 
     # ---------- 提交账号 ----------
     @filter.regex(r'^\d{11}#.+$')
     async def handle_phone_submit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
-        state = self._get_state(user_id)
-        if state != 'waiting_phone':
-            return  # 状态不匹配，忽略
+        state_info = self._get_state_info(user_id)
+        if state_info['state'] != 'waiting_phone':
+            return
 
         text = self._get_text(event)
         phone, password = text.split('#', 1)
@@ -360,12 +352,17 @@ class KuwoManagerPlugin(Star):
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
-        state = self._get_state(user_id)
-        if state != 'waiting_delete':
+        state_info = self._get_state_info(user_id)
+        if state_info['state'] != 'waiting_delete':
+            return
+        # 忽略触发命令本身
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
+            logger.debug(f"忽略触发消息: {current_text}")
             return
 
         try:
-            index = int(self._get_text(event))
+            index = int(current_text)
         except ValueError:
             yield event.plain_result("❌ 请输入有效的数字")
             self._set_state(user_id, 'idle')
@@ -398,12 +395,15 @@ class KuwoManagerPlugin(Star):
     @filter.regex(r'^\d+$')
     async def handle_recharge(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
-        state = self._get_state(user_id)
-        if state != 'waiting_recharge':
+        state_info = self._get_state_info(user_id)
+        if state_info['state'] != 'waiting_recharge':
+            return
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
             return
 
         try:
-            count = int(self._get_text(event))
+            count = int(current_text)
         except:
             yield event.plain_result("❌ 请输入有效数字")
             self._set_state(user_id, 'idle')
@@ -431,12 +431,15 @@ class KuwoManagerPlugin(Star):
     @filter.regex(r'^\d+$')
     async def handle_withdraw(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
-        state = self._get_state(user_id)
-        if state != 'waiting_withdraw':
+        state_info = self._get_state_info(user_id)
+        if state_info['state'] != 'waiting_withdraw':
+            return
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
             return
 
         try:
-            count = int(self._get_text(event))
+            count = int(current_text)
         except:
             yield event.plain_result("❌ 请输入有效数字")
             self._set_state(user_id, 'idle')
