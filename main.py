@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 角色切换自动结束旧交互，超时120秒"""
+    """酷我账号管理 - 删除增加确认"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -30,9 +30,9 @@ class KuwoManagerPlugin(Star):
         self.cache = self._load_cache()
 
         self.state_info = {}
-        self.TIMEOUT = 120  # 秒
+        self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（角色切换自动结束旧交互）已加载")
+        logger.info("✅ 酷我插件（删除确认版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -231,7 +231,6 @@ class KuwoManagerPlugin(Star):
             }
         info = self.state_info[user_id]
         if info['state'] != 'idle' and (now - info['last_active']) > self.TIMEOUT:
-            # 超时重置
             info['state'] = 'idle'
             info['trigger_msg'] = None
             info['admin_mode'] = False
@@ -252,7 +251,6 @@ class KuwoManagerPlugin(Star):
         }
 
     def _reset_common_state(self, user_id: str):
-        """重置普通用户交互状态（保留admin_mode）"""
         info = self._get_state_info(user_id)
         if info['state'] != 'idle':
             info['state'] = 'idle'
@@ -260,7 +258,6 @@ class KuwoManagerPlugin(Star):
             info['tmp_data'] = {}
 
     def _reset_admin_state(self, user_id: str):
-        """重置管理员交互状态（保留非admin_mode）"""
         info = self._get_state_info(user_id)
         if info['state'] != 'idle':
             info['state'] = 'idle'
@@ -285,12 +282,10 @@ class KuwoManagerPlugin(Star):
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
-        # 如果处于管理员模式，先退出管理员交互
         info = self._get_state_info(user_id)
         if info.get('admin_mode', False):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
-        # 重置普通用户状态（确保空闲）
         self._reset_common_state(user_id)
         self._set_state(user_id, 'idle', admin_mode=False)
         menu = await self._get_menu_text(user_id)
@@ -452,12 +447,10 @@ class KuwoManagerPlugin(Star):
         if user_id not in self.admin_qqs:
             yield event.plain_result("❌ 你没有权限执行此操作")
             return
-        # 如果处于普通用户交互状态，先退出
         info = self._get_state_info(user_id)
         if info['state'] != 'idle' and not info.get('admin_mode', False):
             yield event.plain_result("👋 已退出普通用户菜单")
             self._set_state(user_id, 'idle', admin_mode=False)
-        # 重置管理员状态（确保空闲）
         self._reset_admin_state(user_id)
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
@@ -510,7 +503,6 @@ class KuwoManagerPlugin(Star):
             return
         state_info = self._get_state_info(user_id)
         if not state_info.get('admin_mode', False):
-            # 如果管理员模式被超时或其他原因关闭，提示并退出
             if state_info.get('timeout', False):
                 yield event.plain_result("⏰ 管理面板已超时退出，请重新发送「管理」")
             return
@@ -697,6 +689,7 @@ class KuwoManagerPlugin(Star):
             msg += f"\n⚠️ 注意：该手机号原本属于用户 {existing_owner}，已被管理员强制迁移至 {target_qq}"
         return msg
 
+    # ========== 删除账号（增加确认） ==========
     async def _admin_delete_select(self, event):
         user_id = self._get_user_id(event)
         env_entries = await self._get_all_env_entries()
@@ -743,8 +736,28 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone_to_del = env_entries[idx-1]["phone"]
-        result = await self._admin_do_delete(phone_to_del)
-        yield event.plain_result(result)
+        # 进入确认状态
+        self._set_state(user_id, 'admin_delete_wait_confirm', admin_mode=True, tmp_data={'phone_to_del': phone_to_del})
+        yield event.plain_result(f"⚠️ 确认删除该账号（{phone_to_del}）吗？回复 `y` 确认，其他取消。")
+
+    @filter.regex(r'^[yYnN]?$')
+    async def handle_admin_delete_confirm(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        if user_id not in self.admin_qqs:
+            return
+        state_info = self._get_state_info(user_id)
+        if state_info['state'] != 'admin_delete_wait_confirm':
+            return
+        current_text = self._get_text(event).lower()
+        if current_text == 'y':
+            phone_to_del = state_info.get('tmp_data', {}).get('phone_to_del')
+            if not phone_to_del:
+                yield event.plain_result("❌ 会话错误，请重新操作")
+            else:
+                result = await self._admin_do_delete(phone_to_del)
+                yield event.plain_result(result)
+        else:
+            yield event.plain_result("❌ 已取消删除操作")
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
@@ -767,6 +780,7 @@ class KuwoManagerPlugin(Star):
         else:
             return f"✅ 已从环境变量删除手机号 {phone}（未发现绑定记录）"
 
+    # ========== 其他管理员子操作（不变，但为了完整保留） ==========
     async def _admin_auth_select(self, event):
         user_id = self._get_user_id(event)
         env_entries = await self._get_all_env_entries()
