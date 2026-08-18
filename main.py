@@ -1,13 +1,14 @@
 import json
 import os
 import time
+import re
 import aiohttp
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 支持管理员查看所有账户"""
+    """酷我账号管理 - 带管理员管理所有用户功能"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -20,7 +21,7 @@ class KuwoManagerPlugin(Star):
         self.token_expiry = 0
         self.env_name = "kwtx"
 
-        # 管理员QQ列表（从配置读取，逗号分隔）
+        # 管理员QQ列表
         admin_str = config.get("admin_qq", "").strip()
         self.admin_qqs = [qq.strip() for qq in admin_str.split(',') if qq.strip()]
 
@@ -30,11 +31,11 @@ class KuwoManagerPlugin(Star):
         os.makedirs(self.data_dir, exist_ok=True)
         self.cache = self._load_cache()
 
-        # 用户状态
+        # 用户状态（普通用户菜单）
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（管理员功能）已加载")
+        logger.info("✅ 酷我插件（管理员全能管理）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -234,7 +235,7 @@ class KuwoManagerPlugin(Star):
     def _set_state(self, user_id: str, state: str, trigger_msg: str = None):
         self.state_info[user_id] = {'state': state, 'last_active': time.time(), 'trigger_msg': trigger_msg}
 
-    # ---------- 菜单 ----------
+    # ---------- 普通用户菜单 ----------
     async def _get_menu_text(self, user_id: str) -> str:
         my_acc = await self._get_my_accounts(user_id)
         count = len(my_acc)
@@ -249,7 +250,6 @@ class KuwoManagerPlugin(Star):
             "[q] 退出"
         )
 
-    # ---------- 普通用户命令 ----------
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -301,7 +301,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("👋 已退出菜单")
             self._set_state(user_id, 'idle')
 
-    # ---------- 提交账号 ----------
+    # ---------- 提交账号（普通用户） ----------
     @filter.regex(r'^\d{11}#.+$')
     async def handle_phone_submit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -350,7 +350,7 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 删除账号 ----------
+    # ---------- 删除账号（普通用户） ----------
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -392,25 +392,25 @@ class KuwoManagerPlugin(Star):
         yield event.plain_result(menu)
 
     # ---------- 管理员命令 ----------
-    @filter.command("管理查看")
-    async def admin_view_all(self, event: AstrMessageEvent):
-        """管理员查看所有用户绑定信息"""
+    def _is_admin(self, user_id: str) -> bool:
+        return user_id in self.admin_qqs
+
+    @filter.command("管理列表")
+    async def admin_list(self, event: AstrMessageEvent):
+        """查看所有用户绑定信息"""
         user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
+        if not self._is_admin(user_id):
             yield event.plain_result("❌ 你没有权限执行此操作")
             return
 
-        # 获取所有环境变量条目（包含 auth_count）
         all_env = await self._get_all_env_entries()
-        # 构建手机号到 auth_count 的映射
         phone_to_auth = {entry["phone"]: entry["auth_count"] for entry in all_env}
 
         if not self.cache:
             yield event.plain_result("📭 暂无任何用户绑定数据")
             return
 
-        msg = "📋 **所有用户绑定信息**\n"
-        msg += "（以下仅显示手机号和授权次数，密码已隐藏）\n\n"
+        msg = "📋 **所有用户绑定信息**\n（仅显示手机号和授权次数，密码已隐藏）\n\n"
         total_users = 0
         total_accounts = 0
         for qq, data in self.cache.items():
@@ -432,3 +432,207 @@ class KuwoManagerPlugin(Star):
 
         msg += f"统计：共 {total_users} 个用户，{total_accounts} 个绑定账号"
         yield event.plain_result(msg)
+
+    @filter.command("管理绑定")
+    async def admin_bind(self, event: AstrMessageEvent):
+        """管理员为用户绑定账号：管理绑定 <QQ> <手机号> <密码>"""
+        user_id = self._get_user_id(event)
+        if not self._is_admin(user_id):
+            yield event.plain_result("❌ 你没有权限执行此操作")
+            return
+
+        text = self._get_text(event)
+        parts = text.split()
+        if len(parts) < 4:
+            yield event.plain_result("❌ 格式错误：管理绑定 <QQ> <手机号> <密码>")
+            return
+        target_qq = parts[1]
+        phone = parts[2]
+        password = parts[3]
+
+        # 验证手机号格式
+        if not re.match(r'^\d{11}$', phone):
+            yield event.plain_result("❌ 手机号格式错误，须为11位数字")
+            return
+
+        # 验证该手机号是否已被其他用户绑定（但管理员可以覆盖任何用户，这里我们检查是否被其他用户绑定）
+        # 如果该手机号已被其他用户绑定，管理员可以强制覆盖
+        # 我们允许管理员覆盖（直接更新），但给出提示
+        existing_owner = None
+        for qq, data in self.cache.items():
+            for acc in data["accounts"]:
+                if acc["phone"] == phone:
+                    existing_owner = qq
+                    break
+            if existing_owner:
+                break
+
+        # 获取目标用户的缓存
+        target_cache = self._get_cache_user(target_qq)
+        accounts = target_cache["accounts"]
+
+        # 检查目标用户是否已有该手机号
+        found = None
+        for acc in accounts:
+            if acc["phone"] == phone:
+                found = acc
+                break
+
+        if found:
+            # 更新密码
+            found["password"] = password
+            msg = f"✅ 已更新用户 {target_qq} 的手机号 {phone} 的密码"
+        else:
+            accounts.append({"phone": phone, "password": password})
+            msg = f"✅ 已为用户 {target_qq} 绑定手机号 {phone}"
+        self._update_cache_user(target_qq, accounts)
+
+        # 更新环境变量
+        env_entries = await self._get_all_env_entries()
+        # 若手机号已存在，更新密码；否则新增
+        entry_found = None
+        for entry in env_entries:
+            if entry["phone"] == phone:
+                entry_found = entry
+                break
+        if entry_found:
+            entry_found["password"] = password
+            # auth_count 保持不变
+        else:
+            env_entries.append({"phone": phone, "password": password, "auth_count": 0})
+        await self._save_all_env_entries(env_entries)
+
+        if existing_owner and existing_owner != target_qq:
+            msg += f"\n⚠️ 注意：该手机号原本属于用户 {existing_owner}，已被管理员强制迁移至 {target_qq}"
+        yield event.plain_result(msg)
+
+    @filter.command("管理删除")
+    async def admin_delete(self, event: AstrMessageEvent):
+        """管理员删除用户的某个账号：管理删除 <QQ> <手机号>"""
+        user_id = self._get_user_id(event)
+        if not self._is_admin(user_id):
+            yield event.plain_result("❌ 你没有权限执行此操作")
+            return
+
+        text = self._get_text(event)
+        parts = text.split()
+        if len(parts) < 3:
+            yield event.plain_result("❌ 格式错误：管理删除 <QQ> <手机号>")
+            return
+        target_qq = parts[1]
+        phone = parts[2]
+
+        if not re.match(r'^\d{11}$', phone):
+            yield event.plain_result("❌ 手机号格式错误，须为11位数字")
+            return
+
+        target_cache = self._get_cache_user(target_qq)
+        accounts = target_cache["accounts"]
+        found = None
+        for idx, acc in enumerate(accounts):
+            if acc["phone"] == phone:
+                found = idx
+                break
+        if found is None:
+            yield event.plain_result(f"❌ 用户 {target_qq} 下未找到手机号 {phone}")
+            return
+
+        del accounts[found]
+        self._update_cache_user(target_qq, accounts)
+
+        # 从环境变量删除该手机号
+        env_entries = await self._get_all_env_entries()
+        env_entries = [e for e in env_entries if e["phone"] != phone]
+        await self._save_all_env_entries(env_entries)
+
+        yield event.plain_result(f"✅ 已删除用户 {target_qq} 的账号 {phone}")
+
+    @filter.command("管理次数")
+    async def admin_auth(self, event: AstrMessageEvent):
+        """修改指定手机号的授权次数（正数增加，负数减少，0设为0）：管理次数 <手机号> <数量>"""
+        user_id = self._get_user_id(event)
+        if not self._is_admin(user_id):
+            yield event.plain_result("❌ 你没有权限执行此操作")
+            return
+
+        text = self._get_text(event)
+        parts = text.split()
+        if len(parts) < 3:
+            yield event.plain_result("❌ 格式错误：管理次数 <手机号> <数量>")
+            return
+        phone = parts[1]
+        try:
+            delta = int(parts[2])
+        except ValueError:
+            yield event.plain_result("❌ 数量须为整数")
+            return
+
+        if not re.match(r'^\d{11}$', phone):
+            yield event.plain_result("❌ 手机号格式错误，须为11位数字")
+            return
+
+        env_entries = await self._get_all_env_entries()
+        entry_found = None
+        for entry in env_entries:
+            if entry["phone"] == phone:
+                entry_found = entry
+                break
+        if not entry_found:
+            yield event.plain_result(f"❌ 手机号 {phone} 不存在于环境变量中")
+            return
+
+        new_count = entry_found["auth_count"] + delta
+        if new_count < 0:
+            yield event.plain_result(f"❌ 授权次数不能为负数，当前为 {entry_found['auth_count']}，减少 {delta} 将导致负数")
+            return
+        entry_found["auth_count"] = new_count
+        await self._save_all_env_entries(env_entries)
+
+        yield event.plain_result(f"✅ 手机号 {phone} 授权次数已更新为 {new_count}（变动 {delta}）")
+
+    @filter.command("管理提现")
+    async def admin_withdraw(self, event: AstrMessageEvent):
+        """扣减指定账号的授权次数（提现审核）：管理提现 <手机号> <数量>"""
+        # 与管理次数类似，但限定为减少，并给出友好提示
+        user_id = self._get_user_id(event)
+        if not self._is_admin(user_id):
+            yield event.plain_result("❌ 你没有权限执行此操作")
+            return
+
+        text = self._get_text(event)
+        parts = text.split()
+        if len(parts) < 3:
+            yield event.plain_result("❌ 格式错误：管理提现 <手机号> <数量>")
+            return
+        phone = parts[1]
+        try:
+            amount = int(parts[2])
+        except ValueError:
+            yield event.plain_result("❌ 数量须为整数")
+            return
+        if amount <= 0:
+            yield event.plain_result("❌ 提现数量须为正整数")
+            return
+
+        if not re.match(r'^\d{11}$', phone):
+            yield event.plain_result("❌ 手机号格式错误，须为11位数字")
+            return
+
+        env_entries = await self._get_all_env_entries()
+        entry_found = None
+        for entry in env_entries:
+            if entry["phone"] == phone:
+                entry_found = entry
+                break
+        if not entry_found:
+            yield event.plain_result(f"❌ 手机号 {phone} 不存在于环境变量中")
+            return
+
+        if entry_found["auth_count"] < amount:
+            yield event.plain_result(f"❌ 授权次数不足！当前 {entry_found['auth_count']}，需扣减 {amount}")
+            return
+
+        entry_found["auth_count"] -= amount
+        await self._save_all_env_entries(env_entries)
+
+        yield event.plain_result(f"✅ 提现成功！手机号 {phone} 减少 {amount} 次，剩余 {entry_found['auth_count']}")
