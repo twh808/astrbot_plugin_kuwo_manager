@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 修复 trigger_msg 忽略机制"""
+    """酷我账号管理 - 支持重复发送触发命令刷新列表"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（trigger_msg修复）已加载")
+        logger.info("✅ 酷我插件（刷新列表修复）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -579,6 +579,9 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
+            # 刷新列表
+            async for msg in self._admin_bind_select_phone(event):
+                yield msg
             return
 
         try:
@@ -690,7 +693,7 @@ class KuwoManagerPlugin(Star):
             msg += f"\n⚠️ 注意：该手机号原本属于用户 {existing_owner}，已被管理员强制迁移至 {target_qq}"
         return msg
 
-    # ========== 删除账号（已修复 trigger_msg） ==========
+    # ========== 删除账号（刷新列表机制） ==========
     async def _admin_delete_select(self, event):
         user_id = self._get_user_id(event)
         trigger_msg = self._get_text(event)
@@ -727,6 +730,9 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
+            # 刷新列表
+            async for msg in self._admin_delete_select(event):
+                yield msg
             return
         try:
             idx = int(current_text)
@@ -782,7 +788,7 @@ class KuwoManagerPlugin(Star):
         else:
             return f"✅ 已从环境变量删除手机号 {phone}（未发现绑定记录）"
 
-    # ========== 修改授权次数（增加 trigger_msg） ==========
+    # ========== 修改授权次数（刷新列表） ==========
     async def _admin_auth_select(self, event):
         user_id = self._get_user_id(event)
         trigger_msg = self._get_text(event)
@@ -809,6 +815,8 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
+            async for msg in self._admin_auth_select(event):
+                yield msg
             return
         try:
             idx = int(current_text)
@@ -868,7 +876,7 @@ class KuwoManagerPlugin(Star):
         await self._save_all_env_entries(env_entries)
         return f"✅ 手机号 {phone} 授权次数已更新为 {new_count}（变动 {delta}）"
 
-    # ========== 提现审核（增加 trigger_msg） ==========
+    # ========== 提现审核（刷新列表） ==========
     async def _admin_withdraw_select(self, event):
         user_id = self._get_user_id(event)
         trigger_msg = self._get_text(event)
@@ -895,6 +903,8 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
+            async for msg in self._admin_withdraw_select(event):
+                yield msg
             return
         try:
             idx = int(current_text)
@@ -956,7 +966,7 @@ class KuwoManagerPlugin(Star):
         await self._save_all_env_entries(env_entries)
         return f"✅ 提现成功！手机号 {phone} 减少 {amount} 次，剩余 {entry_found['auth_count']}"
 
-    # ========== 重置用户（增加 trigger_msg） ==========
+    # ========== 重置用户（刷新列表） ==========
     async def _admin_reset_select(self, event):
         user_id = self._get_user_id(event)
         trigger_msg = self._get_text(event)
@@ -984,6 +994,8 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
+            async for msg in self._admin_reset_select(event):
+                yield msg
             return
         try:
             idx = int(current_text)
