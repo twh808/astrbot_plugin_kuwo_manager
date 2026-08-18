@@ -7,7 +7,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 修复命令与数字冲突"""
+    """酷我账号管理 - 数据存储于AstrBot全局data目录，支持热更新"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -20,15 +20,16 @@ class KuwoManagerPlugin(Star):
         self.token_expiry = 0
         self.env_name = "kwtx"
 
-        self.data_dir = os.path.join(os.path.dirname(__file__), "data")
+        # 数据存储到 AstrBot 根目录的 data/kuwo_data/ 下，避免被插件更新覆盖
+        self.data_dir = os.path.join(os.getcwd(), "data", "kuwo_data")
         self.cache_file = os.path.join(self.data_dir, "user_data.json")
         os.makedirs(self.data_dir, exist_ok=True)
         self.cache = self._load_cache()
 
-        self.state_info = {}   # user_id: {'state':, 'last_active':, 'trigger_msg':}
-        self.TIMEOUT = 120
+        self.state_info = {}  # user_id: {'state':, 'last_active':, 'trigger_msg':}
+        self.TIMEOUT = 120   # 状态超时时间（秒）
 
-        logger.info("✅ 酷我插件（修复命令冲突）已加载")
+        logger.info("✅ 酷我插件（全局数据存储）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -355,10 +356,8 @@ class KuwoManagerPlugin(Star):
         state_info = self._get_state_info(user_id)
         if state_info['state'] != 'waiting_delete':
             return
-        # 忽略触发命令本身
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
-            logger.debug(f"忽略触发消息: {current_text}")
             return
 
         try:
