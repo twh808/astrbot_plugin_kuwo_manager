@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 支持提交验证码到 CODE 环境变量（修复触发消息）"""
+    """酷我账号管理 - 支持提交验证码（修复重复提交）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -424,7 +424,6 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
-            # 忽略触发消息（即刚输入的 "4"）
             return
         try:
             idx = int(current_text)
@@ -440,7 +439,7 @@ class KuwoManagerPlugin(Star):
         self._set_state(user_id, 'waiting_code_input', admin_mode=False, tmp_data={'phone': phone})
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码：")
 
-    # ---------- 提交验证码：输入验证码 ----------
+    # ---------- 提交验证码：输入验证码（修复重复提交） ----------
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -451,6 +450,7 @@ class KuwoManagerPlugin(Star):
             return
         if state_info['state'] != 'waiting_code_input':
             return
+
         code = self._get_text(event)
         if not code:
             yield event.plain_result("❌ 验证码不能为空")
@@ -463,12 +463,14 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(menu)
             return
 
+        # 立即重置状态，防止同一消息被重复处理
+        self._set_state(user_id, 'idle', admin_mode=False)
+
         if await self._update_code_env(phone, code):
             yield event.plain_result(f"✅ 验证码已提交：手机号 {phone} -> {code}")
         else:
             yield event.plain_result("❌ 提交验证码失败，请稍后重试")
 
-        self._set_state(user_id, 'idle', admin_mode=False)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
@@ -569,9 +571,7 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 管理员交互 ----------
-    # 管理员代码与之前完全相同，为节省篇幅，请参见之前提供的完整版本
-    # 但为了确保完整性，这里包含所有功能
+    # ---------- 管理员交互（完整功能） ----------
     async def _get_admin_menu_text(self) -> str:
         return (
             "=====管理面板=====\n"
@@ -619,7 +619,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
 
-    # ---------- 数字专用处理器 ----------
+    # ---------- 数字专用处理器（管理员） ----------
     @filter.regex(r'^\d+$')
     async def handle_admin_digit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -745,7 +745,7 @@ class KuwoManagerPlugin(Star):
                 async for msg in self._admin_reset_select_handle(event):
                     yield msg
 
-    # ---------- 非数字通用处理器 ----------
+    # ---------- 非数字通用处理器（管理员） ----------
     @filter.regex(r'^[^0-9].*$')
     async def handle_admin_non_digit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
