@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 精确删除确认（y/Y 确认，其他取消，且不重复处理触发消息）"""
+    """酷我账号管理 - 最终重构版（合并确认/取消处理器）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -29,11 +29,10 @@ class KuwoManagerPlugin(Star):
         os.makedirs(self.data_dir, exist_ok=True)
         self.cache = self._load_cache()
 
-        # 用户状态
-        self.state_info = {}  # user_id: {state, last_active, admin_mode, tmp_data, trigger_msg}
+        self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（最终精确版）已加载")
+        logger.info("✅ 酷我插件（重构版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -467,13 +466,17 @@ class KuwoManagerPlugin(Star):
         if not state_info.get('admin_mode', False):
             return
 
+        current_state = state_info['state']
         text = self._get_text(event)
         try:
             num = int(text)
         except:
             return
 
-        current_state = state_info['state']
+        # 在确认状态下，数字只可能被忽略或取消
+        if current_state == 'admin_delete_wait_confirm':
+            # 数字消息由 handle_admin_final 统一处理，这里忽略
+            return
 
         # 菜单选择（空闲状态）
         if current_state == 'idle':
@@ -510,7 +513,7 @@ class KuwoManagerPlugin(Star):
             else:
                 yield event.plain_result("❌ 无效选项，请输入 1-7 或 q")
         else:
-            # 子状态：转发给对应的子处理函数
+            # 子状态（非确认状态）：转发给对应的子处理函数
             if current_state == 'admin_bind_wait_phone_select':
                 async for msg in self._admin_bind_phone_select_handle(event):
                     yield msg
@@ -745,47 +748,46 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone_to_del = env_entries[idx-1]["phone"]
-        # 进入确认状态，并记录触发消息
+        # 进入确认状态，记录触发消息
         self._set_state(user_id, 'admin_delete_wait_confirm', admin_mode=True, tmp_data={'phone_to_del': phone_to_del}, trigger_msg=current_text)
         yield event.plain_result(f"⚠️ 确认删除该账号（{phone_to_del}）吗？回复 y 确认，其他取消。")
 
-    # ---------- 确认删除（只匹配 y/Y） ----------
-    @filter.regex(r'^[yY]$')
-    async def handle_admin_delete_confirm(self, event: AstrMessageEvent):
+    # ---------- 最终确认/取消处理器（合并） ----------
+    @filter.regex(r'^.*$')
+    async def handle_admin_final(self, event: AstrMessageEvent):
+        """
+        处理删除确认状态下的所有消息（包括数字、字母、空格等）。
+        通过比较消息内容和 trigger_msg，决定确认、取消或忽略。
+        """
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
         state_info = self._get_state_info(user_id)
         if state_info['state'] != 'admin_delete_wait_confirm':
             return
-        phone_to_del = state_info.get('tmp_data', {}).get('phone_to_del')
-        if not phone_to_del:
-            yield event.plain_result("❌ 会话错误，请重新操作")
-        else:
-            result = await self._admin_do_delete(phone_to_del)
-            yield event.plain_result(result)
-        self._set_state(user_id, 'idle', admin_mode=True)
-        menu = await self._get_admin_menu_text()
-        yield event.plain_result(menu)
 
-    # ---------- 取消删除：匹配所有非 y/Y 的消息，但忽略触发消息 ----------
-    @filter.regex(r'^(?!y$|Y$).*$')
-    async def handle_admin_delete_cancel(self, event: AstrMessageEvent):
-        """
-        当处于确认删除状态时，任何非 y/Y 的消息都视为取消。
-        但忽略触发消息（即进入该状态的序号消息），避免重复处理。
-        """
-        user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
-            return
-        state_info = self._get_state_info(user_id)
-        if state_info['state'] != 'admin_delete_wait_confirm':
-            return
         current_text = self._get_text(event)
-        # 如果当前消息与触发消息相同，则忽略（不取消）
-        if state_info.get('trigger_msg') == current_text:
+        trigger_msg = state_info.get('trigger_msg')
+
+        # 如果当前消息是 y/Y，执行确认
+        if current_text.lower() == 'y':
+            phone_to_del = state_info.get('tmp_data', {}).get('phone_to_del')
+            if not phone_to_del:
+                yield event.plain_result("❌ 会话错误，请重新操作")
+            else:
+                result = await self._admin_do_delete(phone_to_del)
+                yield event.plain_result(result)
+            self._set_state(user_id, 'idle', admin_mode=True)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
             return
-        # 否则执行取消
+
+        # 如果当前消息等于触发消息，忽略（不取消）
+        if trigger_msg is not None and current_text == trigger_msg:
+            # 忽略该消息，不做任何回复
+            return
+
+        # 否则视为取消
         yield event.plain_result("❌ 已取消删除操作")
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
