@@ -4,12 +4,291 @@ import time
 import re
 import asyncio
 import aiohttp
+import requests
+import base64
+import random
+import string
+import uuid
+import hashlib
+from urllib.parse import quote
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
+# ---------- 酷我验证码发送核心函数（从脚本移植） ----------
+# 常量与加密函数（完整保留）
+SIGN_BASE = 'https://integralapi.kuwo.cn/api/v1/online/sign'
+URL_USER_ASSET = SIGN_BASE + '/v1/earningSignIn/earningUserSignList'
+URL_NEW_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/newDoListen'
+URL_EVERYDAY_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/everydaymusic/doListen'
+URL_BOX_RENEW = SIGN_BASE + '/new/boxRenew'
+URL_NEW_BOX_LIST = SIGN_BASE + '/new/newBoxList'
+URL_NEW_BOX_FINISH = SIGN_BASE + '/new/newBoxFinish'
+FREEMIUM_SWITCH_URL = 'https://wapi.kuwo.cn/openapi/v1/user/freemium/h5/switches'
+
+static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
+static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
+static_e = [31, 0, 1, 2, 3, 4, -1, -1, 3, 4, 5, 6, 7, 8, -1, -1, 7, 8, 9, 10, 11, 12, -1, -1, 11, 12, 13, 14, 15, 16, -1, -1, 15, 16, 17, 18, 19, 20, -1, -1, 19, 20, 21, 22, 23, 24, -1, -1, 23, 24, 25, 26, 27, 28, -1, -1, 27, 28, 29, 30, 31, 30, -1, -1]
+static_l = [0, 1048577, 3145731]
+static_g = [15, 6, 19, 20, 28, 11, 27, 16, 0, 14, 22, 25, 4, 17, 30, 9, 1, 7, 23, 13, 31, 26, 2, 8, 18, 12, 29, 5, 21, 10, 3, 24]
+static_f = [[14, 4, 3, 15, 2, 13, 5, 3, 13, 14, 6, 9, 11, 2, 0, 5, 4, 1, 10, 12, 15, 6, 9, 10, 1, 8, 12, 7, 8, 11, 7, 0, 0, 15, 10, 5, 14, 4, 9, 10, 7, 8, 12, 3, 13, 1, 3, 6, 15, 12, 6, 11, 2, 9, 5, 0, 4, 2, 11, 14, 1, 7, 8, 13], [15, 0, 9, 5, 6, 10, 12, 9, 8, 7, 2, 12, 3, 13, 5, 2, 1, 14, 7, 8, 11, 4, 0, 3, 14, 11, 13, 6, 4, 1, 10, 15, 3, 13, 12, 11, 15, 3, 6, 0, 4, 10, 1, 7, 8, 4, 11, 14, 13, 8, 0, 6, 2, 15, 9, 5, 7, 1, 10, 12, 14, 2, 5, 9], [10, 13, 1, 11, 6, 8, 11, 5, 9, 4, 12, 2, 15, 3, 2, 14, 0, 6, 13, 1, 3, 15, 4, 10, 14, 9, 7, 12, 5, 0, 8, 7, 13, 1, 2, 4, 3, 6, 12, 11, 0, 13, 5, 14, 6, 8, 15, 2, 7, 10, 8, 15, 4, 9, 11, 5, 9, 0, 14, 3, 10, 7, 1, 12], [7, 10, 1, 15, 0, 12, 11, 5, 14, 9, 8, 3, 9, 7, 4, 8, 13, 6, 2, 1, 6, 11, 12, 2, 3, 0, 5, 14, 10, 13, 15, 4, 13, 3, 4, 9, 6, 10, 1, 12, 11, 0, 2, 5, 0, 13, 14, 2, 8, 15, 7, 4, 15, 1, 10, 7, 5, 6, 12, 11, 3, 8, 9, 14], [2, 4, 8, 15, 7, 10, 13, 6, 4, 1, 3, 12, 11, 7, 14, 0, 12, 2, 5, 9, 10, 13, 0, 3, 1, 11, 15, 5, 6, 8, 9, 14, 14, 11, 5, 6, 4, 1, 3, 10, 2, 12, 15, 0, 13, 2, 8, 5, 11, 8, 0, 15, 7, 14, 9, 4, 12, 7, 10, 9, 1, 13, 6, 3], [12, 9, 0, 7, 9, 2, 14, 1, 10, 15, 3, 4, 6, 12, 5, 11, 1, 14, 13, 0, 2, 8, 7, 13, 15, 5, 4, 10, 8, 3, 11, 6, 10, 4, 6, 11, 7, 9, 0, 6, 4, 2, 13, 1, 9, 15, 3, 8, 15, 3, 1, 14, 12, 5, 11, 0, 2, 12, 14, 7, 5, 10, 8, 13], [4, 1, 3, 10, 15, 12, 5, 0, 2, 11, 9, 6, 8, 7, 6, 9, 11, 4, 12, 15, 0, 3, 10, 5, 14, 13, 7, 8, 13, 14, 1, 2, 13, 6, 14, 9, 4, 1, 2, 14, 11, 13, 5, 0, 1, 10, 8, 3, 0, 11, 3, 5, 9, 4, 15, 2, 7, 8, 12, 15, 10, 7, 6, 12], [13, 7, 10, 0, 6, 9, 5, 15, 8, 4, 3, 10, 11, 14, 12, 5, 2, 11, 9, 6, 15, 12, 0, 3, 4, 1, 14, 13, 1, 2, 7, 8, 1, 2, 12, 15, 10, 4, 0, 3, 13, 14, 6, 9, 7, 8, 9, 6, 15, 1, 5, 12, 3, 10, 14, 5, 8, 7, 11, 0, 4, 13, 2, 11]]
+static_h = [39, 7, 47, 15, 55, 23, 63, 31, 38, 6, 46, 14, 54, 22, 62, 30, 37, 5, 45, 13, 53, 21, 61, 29, 36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27, 34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25, 32, 0, 40, 8, 48, 16, 56, 24]
+static_d = [57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7, 56, 48, 40, 32, 24, 16, 8, 0, 58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6]
+static_k = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
+static_j = [13, 16, 10, 23, 0, 4, -1, -1, 2, 27, 14, 5, 20, 9, -1, -1, 22, 18, 11, 3, 25, 7, -1, -1, 15, 6, 26, 19, 12, 1, -1, -1, 40, 51, 30, 36, 46, 54, -1, -1, 29, 39, 50, 44, 32, 47, -1, -1, 43, 48, 38, 55, 33, 52, -1, -1, 45, 41, 49, 35, 28, 31, -1, -1]
+
+def func_a1(iArr, i2, j2):
+    j3 = 0
+    for i3 in range(i2):
+        if iArr[i3] >= 0:
+            jArr = static_c
+            if (jArr[iArr[i3]] & j2) != 0:
+                j3 |= jArr[i3]
+    return j3
+
+def func_a2(j2, jArr, i2):
+    a2 = func_a1(static_i, 56, j2)
+    for i3 in range(16):
+        jArr2 = static_l
+        iArr = static_k
+        a2 = ((a2 & ~jArr2[iArr[i3]]) >> iArr[i3]) | ((jArr2[iArr[i3]] & a2) << (28 - iArr[i3]))
+        jArr[i3] = func_a1(static_j, 64, a2)
+    if i2 == 1:
+        for i4 in range(8):
+            j3 = jArr[i4]
+            i5 = 15 - i4
+            jArr[i4] = jArr[i5]
+            jArr[i5] = j3
+
+def func_a3(jArr, j2):
+    p = [0] * 2
+    q = [0] * 8
+    m = func_a1(static_d, 64, j2)
+    iArr = p
+    j3 = m
+    iArr[0] = int(j3 & 4294967295)
+    iArr[1] = int((j3 & -4294967296) >> 32)
+    for i2 in range(16):
+        o = iArr[1]
+        o = func_a1(static_e, 64, o)
+        o ^= jArr[i2]
+        for i3 in range(8):
+            q[i3] = int((o >> (i3 * 8)) & 255)
+        r = 0
+        i4 = 7
+        while True:
+            t = i4
+            i5 = t
+            if i5 >= 0:
+                i6 = r
+                i6 <<= 4
+                if i6 > 2147483647:
+                    i6 = -4294967296 + i6
+                i6 |= static_f[i5][q[i5]]
+                r = i6
+                i4 = i5 - 1
+            else:
+                break
+        o = r
+        o = func_a1(static_g, 32, o)
+        iArr2 = p
+        n = iArr2[0]
+        iArr2[0] = iArr2[1]
+        xor_val = n ^ o
+        if -2147483648 < xor_val < 2147483647:
+            iArr2[1] = int(xor_val)
+            continue
+        if xor_val >= 2147483647:
+            iArr2[1] = xor_val - 4294967296
+        else:
+            iArr2[1] = xor_val + 4294967296
+    iArr3 = p
+    s = iArr3[0]
+    iArr3[0] = iArr3[1]
+    iArr3[1] = s
+    m = ((iArr3[1] << 32) & -4294967296) | (4294967295 & iArr3[0])
+    m = func_a1(static_h, 64, m)
+    return m
+
+def generate_q(bArr, bArr2):
+    length = len(bArr)
+    jArr = [0] * 16
+    j2 = 0
+    j3 = 0
+    for i3 in range(8):
+        j3 |= bArr2[i3] << (i3 * 8)
+    func_a2(j3, jArr, 0)
+    i4 = length // 8
+    jArr2 = [0] * i4
+    for i5 in range(i4):
+        for i6 in range(8):
+            jArr2[i5] = jArr2[i5] | ((bArr[i5 * 8 + i6] & 255) << (i6 * 8))
+    jArr3 = [0] * (((i4 + 1) * 8 + 1) // 8)
+    for i7 in range(i4):
+        jArr3[i7] = func_a3(jArr, jArr2[i7])
+    i8 = length % 8
+    i9 = i4 * 8
+    i10 = length - i9
+    r12 = [None] * i10
+    r12[0:i10] = bArr[i9:i9 + i10]
+    for i11 in range(i8):
+        j2 |= (r12[i11] & 255) << (i11 * 8)
+    jArr3[i4] = func_a3(jArr, j2)
+    bArr3 = [None] * (len(jArr3) * 8)
+    i12 = 0
+    i13 = 0
+    while i12 < len(jArr3):
+        i14 = i13
+        for i15 in range(8):
+            bArr3[i14] = 255 & (jArr3[i12] >> (i15 * 8))
+            i14 += 1
+        i12 += 1
+        i13 = i14
+    return base64.b64encode(bytearray(bArr3)).decode()
+
+def create_sx():
+    timestamp = int(time.time() * 1000)
+    combined_string = str(timestamp) + '12345678'
+    result = combined_string[:8]
+    return result
+
+def encrypt_devid(dev_id):
+    padded_id = dev_id.ljust(16, '0')[:16]
+    return base64.b64encode(padded_id.encode()).decode()
+
+def get_q(username, password):
+    dev_id = ''.join([random.choice(string.digits) for _ in range(10)])
+    dev_name = '安卓设备'
+    devType = 'arr'
+    data = f"username={quote(username)}&password={quote(base64.b64encode(password.encode()).decode())}&dev_id={dev_id}&user={str(uuid.uuid4()).replace('-', '')}&dev_name={quote(dev_name)}&urlencode=0&src=kwplayer_ar11.1.4.1_40.apk&devResolution=720*1080&&from=android&devType={devType}&sx={create_sx()}&version=11.1.4.1"
+    q_value = generate_q(data.encode('UTF-8'), 'kwks&@69'.encode('UTF-8'))
+    encrypted_dev_id = encrypt_devid(dev_id)
+    return q_value, encrypted_dev_id
+
+def encrypt_phone(phone):
+    key = b'ysiVkLJHHnvMWCHq'
+    iv = b'ichYooX+Mb1gRetP'
+    if isinstance(phone, str):
+        phone = phone.encode('utf-8')
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    padded_plaintext = pad(phone, AES.block_size)
+    ciphertext = cipher.encrypt(padded_plaintext)
+    ciphertext_base64 = base64.b64encode(ciphertext).decode('utf-8')
+    return ciphertext_base64
+
+def login_kuwo(username, password):
+    """登录酷我，返回 (loginUid, loginSid, appUid, encrypted_dev_id) 或 None"""
+    try:
+        q, encrypted_dev_id = get_q(username, password)
+        url = 'http://ar.i.kuwo.cn/US_NEW/kuwo/login_kw'
+        headers = {
+            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 10; MI 8 MIUI/V12.5.2.0.QEACNXM)',
+            'Accept': '*/*',
+            'Host': 'ar.i.kuwo.cn',
+            'Connection': 'Keep-Alive',
+            'Accept-Encoding': 'gzip',
+        }
+        params = {'f': 'ar', 'q': q}
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        set_cookie = response.headers.get('Set-Cookie', '')
+        username_match = re.search(r'uname3=([^;]+)', set_cookie)
+        sid_match = re.search(r'websid=([^;]+)', set_cookie)
+        uid_match = re.search(r'userid=([^;]+)', set_cookie)
+        account_match = re.search(r't3kwid=([^;]+)', set_cookie)
+        if all([username_match, sid_match, uid_match, account_match]):
+            loginUid = uid_match.group(1)
+            loginSid = sid_match.group(1)
+            appUid = account_match.group(1)
+            return loginUid, loginSid, appUid, encrypted_dev_id
+        return None
+    except Exception as e:
+        logger.error(f"酷我登录异常: {e}")
+        return None
+
+def check_withdraw_today(loginUid, loginSid):
+    """检查今日是否已提现"""
+    url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdrawDetails'
+    params = {
+        'loginUid': loginUid,
+        'loginSid': loginSid,
+        'pn': 1,
+        'rn': 10,
+    }
+    headers = {
+        'Host': 'integralapi.kuwo.cn',
+        'Accept': 'application/json, text/plain, */*',
+        'Origin': 'https://h5app.kuwo.cn',
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 KWMusic/12.1.2.0 DeviceModel/iPhone18,3 NetType/WIFI kuwopage',
+        'Referer': 'https://h5app.kuwo.cn/apps/earning-sign/bill.html?random=1783815372333&kwflag=2758068154_1783815205',
+        'Accept-Language': 'zh-CN,zh-Hans;q=0.9',
+        'Connection': 'keep-alive',
+    }
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=5, verify=False)
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+        if data.get('code') != 200:
+            return False
+        records = data.get('data', {}).get('list', [])
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        for item in records:
+            create_time = item.get('createTime', '')
+            if create_time.startswith(today_str):
+                if item.get('status') == 1 or '提现成功' in item.get('description', ''):
+                    return True
+        return False
+    except Exception:
+        return False
+
+def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'):
+    """发送一次验证码，返回 (成功布尔值, 消息字符串)"""
+    url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdraw/sendCode'
+    params = {
+        'loginUid': loginUid,
+        'loginSid': loginSid,
+        'mobile': encrypted_phone,
+        'appuid': appUid,
+        'apiv': '9',
+        'terminal': '1',
+        'quotaId': quota_id,
+        'type': 'blindBox',
+    }
+    headers = {
+        'Host': 'integralapi.kuwo.cn',
+        'Connection': 'keep-alive',
+        'Accept': 'application/json, text/plain, */*',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; MEIZU 18 Pro Build/TKQ1.221114.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/89.0.4389.72 MQQBrowser/6.2 TBS/046295 Mobile Safari/537.36/ kuwopage',
+        'Origin': 'https://h5app.kuwo.cn',
+        'X-Requested-With': 'cn.kuwo.player',
+        'Sec-Fetch-Site': 'same-site',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Dest': 'empty',
+        'Referer': 'https://h5app.kuwo.cn/',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=5, verify=False)
+        text = resp.text
+        try:
+            data = resp.json()
+            msg = data.get('msg', '')
+            desc = data.get('data', {}).get('description', '')
+            combined = f"{msg}|{desc}"
+        except:
+            combined = text
+        lower_text = (text + str(data.get('msg', '')) + str(data.get('data', {}).get('description', ''))).lower()
+        success = '发送成功' in lower_text
+        return success, combined
+    except Exception as e:
+        return False, str(e)
+
+
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 超时主动发送 + 环境变量缓存优化"""
+    """酷我账号管理 - 超时主动发送 + 验证码发送功能"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,12 +314,12 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        # ---------- 环境变量缓存 ----------
-        self._env_cache = None          # 缓存的环境变量条目列表
-        self._env_cache_time = 0        # 缓存时间戳
-        self._env_cache_ttl = 3         # 缓存有效期（秒），避免短时间重复请求
+        # 环境变量缓存
+        self._env_cache = None
+        self._env_cache_time = 0
+        self._env_cache_ttl = 5
 
-        logger.info("✅ 酷我插件（优化缓存版）已加载")
+        logger.info("✅ 酷我插件（含验证码发送）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -129,10 +408,8 @@ class KuwoManagerPlugin(Star):
 
     # ---------- 环境变量读写（kwtx，支持无限制） + 缓存 ----------
     async def _get_all_env_entries(self) -> list:
-        """获取环境变量条目，带有 3 秒缓存，避免重复请求"""
         now = time.time()
         if self._env_cache is not None and (now - self._env_cache_time) < self._env_cache_ttl:
-            logger.debug("使用缓存的环境变量数据")
             return self._env_cache
 
         value = ""
@@ -163,14 +440,11 @@ class KuwoManagerPlugin(Star):
                         except:
                             auth_count = None
                     entries.append({"phone": phone, "password": password, "auth_count": auth_count})
-        # 更新缓存
         self._env_cache = entries
         self._env_cache_time = now
-        logger.debug(f"更新环境变量缓存，共 {len(entries)} 条")
         return entries
 
     async def _save_all_env_entries(self, entries: list) -> bool:
-        """保存环境变量并清空缓存"""
         if not entries:
             new_value = ""
         else:
@@ -182,10 +456,9 @@ class KuwoManagerPlugin(Star):
                     lines.append(f"{e['phone']}#{e['password']}#{e['auth_count']}")
             new_value = '\n'.join(lines)
         result = await self._update_env_value(self.env_name, new_value)
-        # 保存成功后，清空缓存
         if result:
-            self._env_cache = None
-            self._env_cache_time = 0
+            self._env_cache = entries
+            self._env_cache_time = time.time()
         return result
 
     # ---------- 验证码环境变量读写 ----------
@@ -343,10 +616,8 @@ class KuwoManagerPlugin(Star):
                     sent = True
                 except Exception as e:
                     logger.warning(f"使用 UMO 发送超时失败: {e}")
-
             if not sent:
                 logger.error(f"❌ 无法发送超时提醒 (user_id={user_id})")
-
             self._set_state(user_id, 'idle', admin_mode=False, tmp_data={}, in_menu=False)
             if user_id in self.timeout_tasks:
                 del self.timeout_tasks[user_id]
@@ -370,6 +641,41 @@ class KuwoManagerPlugin(Star):
             self.timeout_tasks[user_id].cancel()
             del self.timeout_tasks[user_id]
 
+    # ---------- 验证码发送功能 ----------
+    async def _send_withdraw_code(self, phones: list, quota_id: str = '60004') -> str:
+        """
+        为指定手机号列表发送验证码（每个手机号从环境变量中获取密码）
+        返回结果字符串
+        """
+        if not phones:
+            return "❌ 未指定任何手机号。"
+        env_entries = await self._get_all_env_entries()
+        phone_to_pass = {entry['phone']: entry['password'] for entry in env_entries}
+        results = []
+        for phone in phones:
+            password = phone_to_pass.get(phone)
+            if not password:
+                results.append(f"❌ {phone}: 未在环境变量中找到密码，跳过。")
+                continue
+            # 登录
+            login_result = login_kuwo(phone, password)
+            if not login_result:
+                results.append(f"❌ {phone}: 登录失败")
+                continue
+            loginUid, loginSid, appUid, _ = login_result
+            encrypted_phone = encrypt_phone(phone)
+            # 检查今日是否已提现
+            if check_withdraw_today(loginUid, loginSid):
+                results.append(f"⏭️  {phone}: 今日已提现，跳过发送")
+                continue
+            # 发送验证码
+            success, msg = send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id)
+            if success:
+                results.append(f"✅ {phone}: 验证码发送成功")
+            else:
+                results.append(f"❌ {phone}: 发送失败 ({msg})")
+        return "\n".join(results)
+
     # ---------- 菜单 ----------
     async def _get_menu_text(self, user_id: str) -> str:
         my_acc = await self._get_my_accounts(user_id)
@@ -386,6 +692,7 @@ class KuwoManagerPlugin(Star):
             "[2] 删除账号\n"
             "[3] 查询授权次数明细\n"
             "[4] 提交验证码\n"
+            "[5] 发送验证码\n"
             "[r] 重置我的所有数据\n"
             "[q] 退出"
         )
@@ -401,6 +708,7 @@ class KuwoManagerPlugin(Star):
             "[6] 修改授权次数（设置具体值或无限制）\n"
             "[7] 提现审核（扣减授权次数）\n"
             "[8] 重置用户所有数据\n"
+            "[9] 发送验证码（全部账号）\n"
             "[q] 退出"
         )
 
@@ -480,7 +788,7 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    @filter.regex(r'^[1-4rR]$')
+    @filter.regex(r'^[1-5rR]$')   # 修改为 1-5
     async def handle_menu_choice(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
@@ -551,6 +859,29 @@ class KuwoManagerPlugin(Star):
                 yield event.plain_result(prompt)
                 self._set_state(user_id, 'waiting_code_phone', admin_mode=False, trigger_msg=text, in_menu=True, umo=umo)
                 self._schedule_timeout(user_id)
+        elif text == '5':   # 新增：发送验证码
+            # 获取用户绑定的手机号列表
+            my_acc = await self._get_my_accounts(user_id)
+            if not my_acc:
+                yield event.plain_result("❌ 您没有绑定任何账号，无法发送验证码。")
+                self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+                self._schedule_timeout(user_id)
+                menu = await self._get_menu_text(user_id)
+                yield event.plain_result(menu)
+                return
+            phones = [acc['phone'] for acc in my_acc]
+            # 显示教程并询问
+            tutorial = (
+                "📖 验证码发送教程：\n"
+                "1. 插件将使用您绑定的账号（手机号）登录酷我。\n"
+                "2. 每个账号每日仅可发送一次验证码（用于提现）。\n"
+                "3. 若今日已提现，则不会重复发送。\n"
+                f"4. 即将为以下 {len(phones)} 个账号发送验证码：\n" + "\n".join(phones) + "\n"
+                "确认发送？回复 y 确认，n 取消，其他忽略。"
+            )
+            yield event.plain_result(tutorial)
+            self._set_state(user_id, 'waiting_send_confirm', admin_mode=False, tmp_data={'phones': phones}, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
         elif text == 'r':
             await self._reset_user_data(user_id)
             yield event.plain_result("✅ 您的所有数据已重置")
@@ -558,6 +889,55 @@ class KuwoManagerPlugin(Star):
             self._schedule_timeout(user_id)
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
+
+    # ---------- 普通用户确认发送 ----------
+    @filter.regex(r'^[yYnN]$')
+    async def handle_send_confirm(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        info = self._get_state_info(user_id)
+        if info.get('timeout_triggered', False):
+            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
+            info['timeout_triggered'] = False
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
+            self._cancel_timeout(user_id)
+            return
+
+        if info['state'] != 'waiting_send_confirm' or not info.get('in_menu', False):
+            return
+
+        text = self._get_text(event).lower()
+        if text == 'y':
+            phones = info.get('tmp_data', {}).get('phones', [])
+            if not phones:
+                yield event.plain_result("❌ 没有可发送的账号。")
+            else:
+                # 显示发送中提示
+                yield event.plain_result("⏳ 正在发送验证码，请稍候...")
+                # 执行发送（同步操作，但为了不阻塞，放在线程池中？这里简单同步）
+                try:
+                    # 注意：发送函数会阻塞，但在这里直接调用将阻塞事件循环，建议使用 asyncio.to_thread
+                    result = await asyncio.to_thread(self._sync_send_codes, phones)
+                    yield event.plain_result(result)
+                except Exception as e:
+                    yield event.plain_result(f"❌ 发送异常: {e}")
+        else:
+            yield event.plain_result("❌ 已取消发送。")
+
+        # 返回菜单
+        umo = info.get('umo')
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+        self._schedule_timeout(user_id)
+        menu = await self._get_menu_text(user_id)
+        yield event.plain_result(menu)
+
+    def _sync_send_codes(self, phones):
+        """同步执行发送，返回结果字符串（供 asyncio.to_thread 调用）"""
+        quota_id = os.getenv('QUOTA_ID', '60004')
+        return asyncio.run(self._send_withdraw_code(phones, quota_id))
 
     # ---------- 提交验证码：输入验证码 ----------
     @filter.regex(r'^.+$')
@@ -911,8 +1291,27 @@ class KuwoManagerPlugin(Star):
                 self._schedule_timeout(user_id)
                 async for msg in self._admin_reset_select(event):
                     yield msg
+            elif num == 9:   # 新增：管理员发送全部账号验证码
+                # 获取所有环境变量中的手机号
+                env_entries = await self._get_all_env_entries()
+                if not env_entries:
+                    yield event.plain_result("❌ 环境变量中没有账号。")
+                    self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, umo=umo)
+                    self._schedule_timeout(user_id)
+                    menu = await self._get_admin_menu_text()
+                    yield event.plain_result(menu)
+                    return
+                phones = [entry['phone'] for entry in env_entries]
+                tutorial = (
+                    "📖 管理员验证码发送：\n"
+                    "将向环境变量中所有账号发送验证码（共 {} 个）。\n"
+                    "确认发送？回复 y 确认，n 取消。"
+                ).format(len(phones))
+                yield event.plain_result(tutorial)
+                self._set_state(user_id, 'admin_wait_send_all', admin_mode=True, tmp_data={'phones': phones}, in_menu=True, umo=umo)
+                self._schedule_timeout(user_id)
             else:
-                yield event.plain_result("❌ 无效选项，请输入 1-8 或 q")
+                yield event.plain_result("❌ 无效选项，请输入 1-9 或 q")
         else:
             # 子状态
             umo = event.unified_msg_origin
@@ -948,6 +1347,25 @@ class KuwoManagerPlugin(Star):
             elif current_state == 'admin_reset_wait_select':
                 async for msg in self._admin_reset_select_handle(event):
                     yield msg
+            elif current_state == 'admin_wait_send_all':
+                # 处理确认
+                if text.lower() == 'y':
+                    phones = info.get('tmp_data', {}).get('phones', [])
+                    if phones:
+                        yield event.plain_result("⏳ 正在发送验证码，请稍候...")
+                        try:
+                            result = await asyncio.to_thread(self._sync_send_codes, phones)
+                            yield event.plain_result(result)
+                        except Exception as e:
+                            yield event.plain_result(f"❌ 发送异常: {e}")
+                    else:
+                        yield event.plain_result("❌ 没有可发送的账号。")
+                else:
+                    yield event.plain_result("❌ 已取消发送。")
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, umo=umo)
+                self._schedule_timeout(user_id)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
 
     # ---------- 非数字通用处理器（管理员） ----------
     @filter.regex(r'^[^0-9].*$')
@@ -1036,7 +1454,7 @@ class KuwoManagerPlugin(Star):
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
 
-    # ---------- 管理员查看功能 ----------
+    # ---------- 以下为管理员子操作（未改动，仅保留） ----------
     async def _admin_view_all_bindings(self) -> str:
         if not self.cache:
             return "📭 暂无任何用户绑定数据"
@@ -1075,7 +1493,7 @@ class KuwoManagerPlugin(Star):
             msg += f"📱 {phone} ｜ 授权: {auth_display} ｜ 绑定QQ: {qq}\n"
         return msg
 
-    # ---------- 绑定账号子操作 ----------
+    # 绑定账号子操作
     async def _admin_bind_select_phone(self, event):
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
@@ -1243,7 +1661,7 @@ class KuwoManagerPlugin(Star):
             msg += f"\n⚠️ 注意：该手机号原本属于用户 {existing_owner}，已被管理员强制迁移至 {target_qq}"
         return msg
 
-    # ---------- 解除绑定子操作 ----------
+    # 解除绑定子操作
     async def _admin_unbind_select(self, event):
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
@@ -1354,7 +1772,7 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
 
-    # ---------- 删除账号子操作 ----------
+    # 删除账号子操作
     async def _admin_delete_select(self, event):
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
@@ -1450,7 +1868,7 @@ class KuwoManagerPlugin(Star):
         else:
             return f"✅ 已从环境变量删除手机号 {phone}（未发现绑定记录）"
 
-    # ---------- 修改授权次数子操作 ----------
+    # 修改授权次数子操作
     async def _admin_auth_select(self, event):
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
@@ -1519,7 +1937,7 @@ class KuwoManagerPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入新的授权次数（数字）或输入 '无限制'（发送 q 取消）：")
 
-    # ---------- 提现审核子操作 ----------
+    # 提现审核子操作
     async def _admin_withdraw_select(self, event):
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
@@ -1663,7 +2081,7 @@ class KuwoManagerPlugin(Star):
         await self._save_all_env_entries(env_entries)
         return f"✅ 提现成功！手机号 {phone} 减少 {amount} 次，剩余 {entry_found['auth_count']}"
 
-    # ---------- 重置用户子操作 ----------
+    # 重置用户子操作
     async def _admin_reset_select(self, event):
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
