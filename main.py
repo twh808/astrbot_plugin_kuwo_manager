@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终重构版（合并确认/取消处理器）"""
+    """酷我账号管理 - 删除确认最终版（时间窗口 + trigger_msg）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（重构版）已加载")
+        logger.info("✅ 酷我插件（删除确认最终版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -227,7 +227,8 @@ class KuwoManagerPlugin(Star):
                 'last_active': now,
                 'admin_mode': False,
                 'tmp_data': {},
-                'trigger_msg': None
+                'trigger_msg': None,
+                'confirm_time': 0
             }
         info = self.state_info[user_id]
         if info['state'] != 'idle' and (now - info['last_active']) > self.TIMEOUT:
@@ -235,19 +236,21 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             info['tmp_data'] = {}
             info['trigger_msg'] = None
+            info['confirm_time'] = 0
             info['last_active'] = now
             info['timeout'] = True
         else:
             info['timeout'] = False
         return info
 
-    def _set_state(self, user_id: str, state: str, admin_mode: bool = False, tmp_data: dict = None, trigger_msg: str = None):
+    def _set_state(self, user_id: str, state: str, admin_mode: bool = False, tmp_data: dict = None, trigger_msg: str = None, confirm_time: float = 0):
         self.state_info[user_id] = {
             'state': state,
             'last_active': time.time(),
             'admin_mode': admin_mode,
             'tmp_data': tmp_data or {},
-            'trigger_msg': trigger_msg
+            'trigger_msg': trigger_msg,
+            'confirm_time': confirm_time
         }
 
     def _reset_admin_state(self, user_id: str):
@@ -256,6 +259,7 @@ class KuwoManagerPlugin(Star):
             info['state'] = 'idle'
             info['tmp_data'] = {}
             info['trigger_msg'] = None
+            info['confirm_time'] = 0
 
     # ---------- 普通用户菜单 ----------
     async def _get_menu_text(self, user_id: str) -> str:
@@ -473,9 +477,8 @@ class KuwoManagerPlugin(Star):
         except:
             return
 
-        # 在确认状态下，数字只可能被忽略或取消
+        # 在确认状态下，数字由 handle_admin_final 处理，这里直接忽略
         if current_state == 'admin_delete_wait_confirm':
-            # 数字消息由 handle_admin_final 统一处理，这里忽略
             return
 
         # 菜单选择（空闲状态）
@@ -748,17 +751,13 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone_to_del = env_entries[idx-1]["phone"]
-        # 进入确认状态，记录触发消息
-        self._set_state(user_id, 'admin_delete_wait_confirm', admin_mode=True, tmp_data={'phone_to_del': phone_to_del}, trigger_msg=current_text)
+        # 进入确认状态，记录触发消息和时间戳
+        self._set_state(user_id, 'admin_delete_wait_confirm', admin_mode=True, tmp_data={'phone_to_del': phone_to_del}, trigger_msg=current_text, confirm_time=time.time())
         yield event.plain_result(f"⚠️ 确认删除该账号（{phone_to_del}）吗？回复 y 确认，其他取消。")
 
-    # ---------- 最终确认/取消处理器（合并） ----------
+    # ---------- 最终确认/取消处理器（时间窗口 + trigger_msg） ----------
     @filter.regex(r'^.*$')
     async def handle_admin_final(self, event: AstrMessageEvent):
-        """
-        处理删除确认状态下的所有消息（包括数字、字母、空格等）。
-        通过比较消息内容和 trigger_msg，决定确认、取消或忽略。
-        """
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
@@ -768,8 +767,14 @@ class KuwoManagerPlugin(Star):
 
         current_text = self._get_text(event)
         trigger_msg = state_info.get('trigger_msg')
+        confirm_time = state_info.get('confirm_time', 0)
+        now = time.time()
 
-        # 如果当前消息是 y/Y，执行确认
+        # 如果当前消息与触发消息相同，并且在状态变更后 2 秒内，则忽略（防止自动取消）
+        if trigger_msg is not None and current_text == trigger_msg and (now - confirm_time) < 2:
+            return
+
+        # 确认（y/Y）
         if current_text.lower() == 'y':
             phone_to_del = state_info.get('tmp_data', {}).get('phone_to_del')
             if not phone_to_del:
@@ -782,12 +787,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(menu)
             return
 
-        # 如果当前消息等于触发消息，忽略（不取消）
-        if trigger_msg is not None and current_text == trigger_msg:
-            # 忽略该消息，不做任何回复
-            return
-
-        # 否则视为取消
+        # 其他内容视为取消
         yield event.plain_result("❌ 已取消删除操作")
         self._set_state(user_id, 'idle', admin_mode=True)
         menu = await self._get_admin_menu_text()
