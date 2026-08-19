@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 超时提醒最终版"""
+    """酷我账号管理 - 超时提醒最终版（修复 session_id）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（超时提醒最终版）已加载")
+        logger.info("✅ 酷我插件（超时提醒修复版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -253,16 +253,15 @@ class KuwoManagerPlugin(Star):
             return event.get_session_id()
         return "unknown"
 
+    # ----- 修复：正确获取 session_id -----
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取 session_id，优先使用框架提供的方法，但存储 user_id"""
-        user_id = self._get_user_id(event)
-        # 尝试从 event 获取 session_id，如果有的话直接返回
+        """获取有效的会话 ID，优先使用框架提供的 API"""
         if hasattr(event, 'get_session_id'):
             sid = event.get_session_id()
             if sid and isinstance(sid, str) and sid:
                 return sid
-        # 否则返回 user_id，在超时回调中会构造多种格式
-        return user_id
+        # 若无法获取，则回退为 user_id（可能无效，但尽力而为）
+        return self._get_user_id(event)
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
@@ -296,6 +295,8 @@ class KuwoManagerPlugin(Star):
         return info
 
     def _set_state(self, user_id: str, state: str, admin_mode: bool = False, tmp_data: dict = None, trigger_msg: str = None, in_menu: bool = False, session_id: str = None):
+        # 若未传入 session_id，保留旧值
+        old = self.state_info.get(user_id, {})
         self.state_info[user_id] = {
             'state': state,
             'last_active': time.time(),
@@ -304,7 +305,7 @@ class KuwoManagerPlugin(Star):
             'trigger_msg': trigger_msg,
             'in_menu': in_menu,
             'timeout_triggered': False,
-            'session_id': session_id or self.state_info.get(user_id, {}).get('session_id')
+            'session_id': session_id if session_id is not None else old.get('session_id')
         }
 
     def _reset_admin_state(self, user_id: str):
@@ -317,28 +318,41 @@ class KuwoManagerPlugin(Star):
             info['timeout_triggered'] = False
 
     # ---------- 超时任务管理 ----------
+    # ----- 修复：使用存储的 session_id 发送超时提醒 -----
     async def _timeout_callback(self, user_id: str):
         info = self._get_state_info(user_id)
         if info['in_menu'] or info['state'] != 'idle':
-            # 尝试多种 session_id 格式
-            formats = [
-                f"aiocqhttp:friend:{user_id}",
-                f"aiocqhttp:private:{user_id}",
-                f"aiocqhttp:user:{user_id}",
-                f"aiocqhttp:Friend:{user_id}",
-                f"aiocqhttp:Private:{user_id}",
-            ]
+            sid = info.get('session_id')
             sent = False
-            for sid in formats:
+            if sid:
                 try:
                     await self.context.send_message(sid, "⏰ 操作已超时，已退出交互。")
                     logger.info(f"已向会话 {sid} 发送超时提醒")
                     sent = True
-                    break
                 except Exception as e:
-                    logger.debug(f"尝试 session_id {sid} 失败: {e}")
+                    logger.debug(f"使用存储的 session_id {sid} 发送失败: {e}")
+
+            if not sent:
+                # 回退构造常见格式
+                formats = [
+                    f"aiocqhttp:friend:{user_id}",
+                    f"aiocqhttp:private:{user_id}",
+                    f"aiocqhttp:user:{user_id}",
+                    f"aiocqhttp:Friend:{user_id}",
+                    f"aiocqhttp:Private:{user_id}",
+                ]
+                for sid in formats:
+                    try:
+                        await self.context.send_message(sid, "⏰ 操作已超时，已退出交互。")
+                        logger.info(f"已向会话 {sid} 发送超时提醒")
+                        sent = True
+                        break
+                    except Exception as e:
+                        logger.debug(f"尝试 session_id {sid} 失败: {e}")
+
             if not sent:
                 logger.error(f"所有 session_id 格式均失败，无法发送超时提醒")
+
             self._set_state(user_id, 'idle', admin_mode=False, tmp_data={}, in_menu=False)
             if user_id in self.timeout_tasks:
                 del self.timeout_tasks[user_id]
