@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 修复 session_id 格式"""
+    """酷我账号管理 - 完整版（q取消+超时提醒）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（session格式修复）已加载")
+        logger.info("✅ 酷我插件（完整版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -254,21 +254,32 @@ class KuwoManagerPlugin(Star):
         return "unknown"
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取符合框架要求的 session_id，私聊使用 aiocqhttp:user_id:user_id"""
-        # 优先使用框架提供的方法
+        """获取符合框架要求的 session_id（私聊: aiocqhttp:user:private, 群聊: aiocqhttp:user:group）"""
+        # 1. 优先使用框架提供的方法
         if hasattr(event, 'get_session_id'):
             sid = event.get_session_id()
-            if sid and len(sid.split(':')) >= 2:
-                return sid
-        # 手动构造
+            if sid:
+                if ':' in sid:
+                    parts = sid.split(':')
+                    if len(parts) == 3 and parts[0] == 'aiocqhttp':
+                        if hasattr(event, 'group_id') and event.group_id:
+                            return f"{parts[0]}:{parts[1]}:group"
+                        else:
+                            return f"{parts[0]}:{parts[1]}:private"
+                    else:
+                        return sid
+                else:
+                    user_id = sid
+                    if hasattr(event, 'group_id') and event.group_id:
+                        return f"aiocqhttp:{user_id}:group"
+                    else:
+                        return f"aiocqhttp:{user_id}:private"
+        # 2. 手动构造
         user_id = self._get_user_id(event)
-        # 检查是否为群聊
-        if hasattr(event, 'group_id'):
-            group_id = event.group_id
-            if group_id:
-                return f"aiocqhttp:{user_id}:{group_id}"
-        # 私聊，第三部分也用 user_id
-        return f"aiocqhttp:{user_id}:{user_id}"
+        if hasattr(event, 'group_id') and event.group_id:
+            return f"aiocqhttp:{user_id}:group"
+        else:
+            return f"aiocqhttp:{user_id}:private"
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
@@ -408,6 +419,7 @@ class KuwoManagerPlugin(Star):
         admin_mode = state_info.get('admin_mode', False)
         in_menu = state_info.get('in_menu', False)
 
+        # 如果已经在菜单状态，执行退出菜单
         if current_state == 'menu_idle' and in_menu:
             yield event.plain_result("👋 已退出菜单")
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
@@ -420,6 +432,7 @@ class KuwoManagerPlugin(Star):
             self._cancel_timeout(user_id)
             return
 
+        # 如果处于子操作状态（非菜单状态），取消操作返回菜单
         if in_menu and current_state not in ['idle', 'menu_idle', 'admin_menu_idle']:
             if admin_mode:
                 yield event.plain_result("👋 已取消操作，返回管理面板")
@@ -475,14 +488,14 @@ class KuwoManagerPlugin(Star):
         if text == '1':
             self._set_state(user_id, 'waiting_phone', admin_mode=False, in_menu=True)
             self._schedule_timeout(user_id)
-            yield event.plain_result("请输入手机号#密码（例如：13800138000#mypassword）")
+            yield event.plain_result("请输入手机号#密码（例如：13800138000#mypassword）（发送 q 取消）")
         elif text == '2':
             my_acc = await self._get_my_accounts(user_id)
             if not my_acc:
                 yield event.plain_result("❌ 您没有绑定任何账号")
             else:
                 lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
-                prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）："
+                prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）（发送 q 取消）："
                 yield event.plain_result(prompt)
                 self._set_state(user_id, 'waiting_delete', admin_mode=False, trigger_msg=text, in_menu=True)
                 self._schedule_timeout(user_id)
@@ -516,7 +529,7 @@ class KuwoManagerPlugin(Star):
                 yield event.plain_result("❌ 您没有绑定任何账号，请先提交账号")
             else:
                 lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
-                prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号："
+                prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号（发送 q 取消）："
                 yield event.plain_result(prompt)
                 self._set_state(user_id, 'waiting_code_phone', admin_mode=False, trigger_msg=text, in_menu=True)
                 self._schedule_timeout(user_id)
@@ -596,7 +609,7 @@ class KuwoManagerPlugin(Star):
         phone = my_acc[idx-1]["phone"]
         self._set_state(user_id, 'waiting_code_input', admin_mode=False, tmp_data={'phone': phone}, in_menu=True)
         self._schedule_timeout(user_id)
-        yield event.plain_result(f"已选择账号 {phone}，请输入验证码：")
+        yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
     # ---------- 提交账号（普通用户） ----------
     @filter.regex(r'^\d{11}#.+$')
@@ -1025,7 +1038,7 @@ class KuwoManagerPlugin(Star):
         for idx, entry in enumerate(unbound_phones, 1):
             auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
             msg += f"{idx}. {entry['phone']} ｜ 授权次数: {auth_display}\n"
-        msg += "请选择要绑定的手机号序号："
+        msg += "请选择要绑定的手机号序号（发送 q 取消）："
         self._set_state(user_id, 'admin_bind_wait_phone_select', admin_mode=True, in_menu=True, tmp_data={'unbound_phones': unbound_phones})
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
@@ -1060,14 +1073,14 @@ class KuwoManagerPlugin(Star):
             for i, qq in enumerate(qq_list, 1):
                 acc_count = len(self.cache[qq].get("accounts", []))
                 msg += f"{i}. {qq} ｜ 账号数: {acc_count}\n"
-            msg += f"请输入要绑定到该手机号的QQ序号（或直接输入新QQ号）："
+            msg += f"请输入要绑定到该手机号的QQ序号（或直接输入新QQ号，发送 q 取消）："
             self._set_state(user_id, 'admin_bind_wait_qq_select', admin_mode=True, in_menu=True, tmp_data={'selected_phone': selected_phone, 'qq_list': qq_list})
             self._schedule_timeout(user_id)
             yield event.plain_result(msg)
         else:
             self._set_state(user_id, 'admin_bind_wait_qq_input', admin_mode=True, in_menu=True, tmp_data={'selected_phone': selected_phone})
             self._schedule_timeout(user_id)
-            yield event.plain_result("当前无绑定记录，请输入要绑定的QQ号：")
+            yield event.plain_result("当前无绑定记录，请输入要绑定的QQ号（发送 q 取消）：")
 
     async def _admin_bind_qq_select_handle(self, event) -> str:
         user_id = self._get_user_id(event)
@@ -1187,7 +1200,7 @@ class KuwoManagerPlugin(Star):
         for idx, item in enumerate(bound_list, 1):
             auth_display = "无限制" if item["auth_count"] is None else str(item["auth_count"])
             msg += f"{idx}. {item['phone']} ｜ 授权: {auth_display} ｜ 绑定QQ: {item['qq']}\n"
-        msg += "请输入要解除绑定的账号序号："
+        msg += "请输入要解除绑定的账号序号（发送 q 取消）："
         self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, in_menu=True, tmp_data={'bound_list': bound_list})
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
@@ -1268,7 +1281,7 @@ class KuwoManagerPlugin(Star):
                 if bound_qq != "未绑定":
                     break
             msg += f"{idx}. {phone} ｜ 授权: {auth_display} ｜ 绑定QQ: {bound_qq}\n"
-        msg += "请输入要删除的账号序号："
+        msg += "请输入要删除的账号序号（发送 q 取消）："
         self._set_state(user_id, 'admin_delete_wait_select', admin_mode=True, in_menu=True, tmp_data={'env_entries': env_entries})
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
@@ -1342,7 +1355,7 @@ class KuwoManagerPlugin(Star):
         for idx, entry in enumerate(env_entries, 1):
             auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
             msg += f"{idx}. {entry['phone']} ｜ 授权: {auth_display}\n"
-        msg += "请输入要修改授权次数的账号序号："
+        msg += "请输入要修改授权次数的账号序号（发送 q 取消）："
         self._set_state(user_id, 'admin_auth_wait_select', admin_mode=True, in_menu=True, tmp_data={'env_entries': env_entries})
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
@@ -1372,7 +1385,7 @@ class KuwoManagerPlugin(Star):
         phone = env_entries[idx-1]["phone"]
         self._set_state(user_id, 'admin_auth_wait_new_value', admin_mode=True, in_menu=True, tmp_data={'phone': phone})
         self._schedule_timeout(user_id)
-        yield event.plain_result(f"已选择账号 {phone}，请输入新的授权次数（数字）或输入 '无限制'：")
+        yield event.plain_result(f"已选择账号 {phone}，请输入新的授权次数（数字）或输入 '无限制'（发送 q 取消）：")
 
     # ---------- 提现审核子操作 ----------
     async def _admin_withdraw_select(self, event):
@@ -1398,7 +1411,7 @@ class KuwoManagerPlugin(Star):
         for idx, entry in enumerate(env_entries, 1):
             auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
             msg += f"{idx}. {entry['phone']} ｜ 授权: {auth_display}\n"
-        msg += "请输入要提现扣减的账号序号："
+        msg += "请输入要提现扣减的账号序号（发送 q 取消）："
         self._set_state(user_id, 'admin_withdraw_wait_select', admin_mode=True, in_menu=True, tmp_data={'env_entries': env_entries})
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
@@ -1438,7 +1451,7 @@ class KuwoManagerPlugin(Star):
                 break
         self._set_state(user_id, 'admin_withdraw_wait_amount', admin_mode=True, in_menu=True, tmp_data={'phone': phone})
         self._schedule_timeout(user_id)
-        yield event.plain_result(f"已选择账号 {phone}，请输入要提现扣减的数量（正整数）：")
+        yield event.plain_result(f"已选择账号 {phone}，请输入要提现扣减的数量（正整数，发送 q 取消）：")
 
     @filter.regex(r'^\d+$')
     async def handle_admin_withdraw_amount(self, event: AstrMessageEvent):
@@ -1520,7 +1533,7 @@ class KuwoManagerPlugin(Star):
         for idx, qq in enumerate(qq_list, 1):
             acc_count = len(self.cache[qq].get("accounts", []))
             msg += f"{idx}. {qq} ｜ 账号数: {acc_count}\n"
-        msg += "请输入要重置的QQ序号："
+        msg += "请输入要重置的QQ序号（发送 q 取消）："
         self._set_state(user_id, 'admin_reset_wait_select', admin_mode=True, in_menu=True, tmp_data={'qq_list': qq_list})
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
