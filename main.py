@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终稳定版（自动补充 session_id）"""
+    """酷我账号管理 - 最终稳定版（主动超时提醒）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（稳定版）已加载")
+        logger.info("✅ 酷我插件（最终版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -254,47 +254,12 @@ class KuwoManagerPlugin(Star):
         return "unknown"
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取并确保 session_id 格式为 aiocqhttp:private/group:user_id"""
-        # 优先获取框架提供的 session_id
-        sid = None
-        if hasattr(event, 'get_session_id'):
-            sid = event.get_session_id()
-        if not sid and hasattr(event, 'session_id'):
-            sid = event.session_id
-        if not sid and hasattr(event, 'message_obj') and hasattr(event.message_obj, 'session_id'):
-            sid = event.message_obj.session_id
-
-        # 如果获取到的 sid 是纯数字，或格式不正确，我们重新构造
-        if sid and isinstance(sid, str):
-            # 如果已经包含冒号，且以 aiocqhttp 开头，直接返回
-            if ':' in sid and sid.startswith('aiocqhttp'):
-                return sid
-            # 如果包含冒号但不是 aiocqhttp，尝试修正
-            if ':' in sid:
-                parts = sid.split(':')
-                if len(parts) == 3 and parts[0] == 'aiocqhttp':
-                    return sid
-                # 否则提取 user_id
-                user_id = parts[-1]
-                # 判断群聊还是私聊
-                if hasattr(event, 'group_id') and event.group_id:
-                    return f"aiocqhttp:group:{user_id}"
-                else:
-                    return f"aiocqhttp:private:{user_id}"
-            else:
-                # 纯数字，认为就是 user_id
-                user_id = sid
-                if hasattr(event, 'group_id') and event.group_id:
-                    return f"aiocqhttp:group:{user_id}"
-                else:
-                    return f"aiocqhttp:private:{user_id}"
+        """根据框架实际要求，返回 aiocqhttp:用户ID:friend（私聊）或 aiocqhttp:用户ID:group（群聊）"""
+        user_id = self._get_user_id(event)
+        if hasattr(event, 'group_id') and event.group_id:
+            return f"aiocqhttp:{user_id}:group"
         else:
-            # 完全获取不到，用 user_id 构造
-            user_id = self._get_user_id(event)
-            if hasattr(event, 'group_id') and event.group_id:
-                return f"aiocqhttp:group:{user_id}"
-            else:
-                return f"aiocqhttp:private:{user_id}"
+            return f"aiocqhttp:{user_id}:friend"
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
