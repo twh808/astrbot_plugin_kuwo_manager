@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 超时提醒最终版（修复 session_id）"""
+    """酷我账号管理 - 超时提醒最终修复版"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（超时提醒修复版）已加载")
+        logger.info("✅ 酷我插件（超时提醒最终修复版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -253,15 +253,24 @@ class KuwoManagerPlugin(Star):
             return event.get_session_id()
         return "unknown"
 
-    # ----- 修复：正确获取 session_id -----
+    # ----- 修复：正确获取 session_id，并转为三段式 -----
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取有效的会话 ID，优先使用框架提供的 API"""
+        """获取有效的会话 ID，若为纯数字则自动构造三段式"""
+        sid = None
         if hasattr(event, 'get_session_id'):
             sid = event.get_session_id()
-            if sid and isinstance(sid, str) and sid:
-                return sid
-        # 若无法获取，则回退为 user_id（可能无效，但尽力而为）
-        return self._get_user_id(event)
+        if sid and isinstance(sid, str) and sid:
+            # 如果 sid 是纯数字，构造三段式
+            if sid.isdigit():
+                # 尝试从 event 获取平台/adapter，否则默认 aiocqhttp
+                platform = getattr(event, 'platform', None) or getattr(event, 'adapter', None) or 'aiocqhttp'
+                sid = f"{platform}:private:{sid}"
+            return sid
+        # 最终回退：构造默认格式
+        user_id = self._get_user_id(event)
+        if user_id.isdigit():
+            return f"aiocqhttp:private:{user_id}"
+        return user_id
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
@@ -295,7 +304,6 @@ class KuwoManagerPlugin(Star):
         return info
 
     def _set_state(self, user_id: str, state: str, admin_mode: bool = False, tmp_data: dict = None, trigger_msg: str = None, in_menu: bool = False, session_id: str = None):
-        # 若未传入 session_id，保留旧值
         old = self.state_info.get(user_id, {})
         self.state_info[user_id] = {
             'state': state,
@@ -318,14 +326,13 @@ class KuwoManagerPlugin(Star):
             info['timeout_triggered'] = False
 
     # ---------- 超时任务管理 ----------
-    # ----- 修复：使用存储的 session_id 发送超时提醒 -----
     async def _timeout_callback(self, user_id: str):
         info = self._get_state_info(user_id)
         if info['in_menu'] or info['state'] != 'idle':
             sid = info.get('session_id')
             sent = False
 
-            # 1. 优先使用存储的 session_id
+            # 1. 优先尝试存储的 session_id（已是三段式）
             if sid:
                 try:
                     await self.context.send_message(sid, "⏰ 操作已超时，已退出交互。")
@@ -334,32 +341,40 @@ class KuwoManagerPlugin(Star):
                 except Exception as e:
                     logger.warning(f"使用存储的 session_id {sid} 发送失败: {e}")
 
-            # 2. 若失败，尝试多种常见格式（覆盖不同适配器）
+            # 2. 若失败，尝试多种常见前缀
             if not sent:
-                formats = [
-                    f"aiocqhttp:private:{user_id}",
-                    f"aiocqhttp:friend:{user_id}",
-                    f"aiocqhttp:user:{user_id}",
-                    f"onebot:private:{user_id}",
-                    f"onebot:friend:{user_id}",
-                    f"onebot:user:{user_id}",
-                    f"private:{user_id}",
-                    f"friend:{user_id}",
-                    user_id,  # 直接传 QQ 号（部分框架支持）
-                ]
-                for fmt in formats:
-                    try:
-                        await self.context.send_message(fmt, "⏰ 操作已超时，已退出交互。")
-                        logger.info(f"✅ 已向会话 {fmt} 发送超时提醒")
-                        sent = True
+                # 如果 sid 是纯数字（意外情况），构造三段式
+                if sid and sid.isdigit():
+                    base = sid
+                else:
+                    base = user_id
+                platforms = ['aiocqhttp', 'onebot', 'qq', 'go-cqhttp', 'default']
+                session_types = ['private', 'friend', 'user']
+                for platform in platforms:
+                    for stype in session_types:
+                        fmt = f"{platform}:{stype}:{base}"
+                        try:
+                            await self.context.send_message(fmt, "⏰ 操作已超时，已退出交互。")
+                            logger.info(f"✅ 已向会话 {fmt} 发送超时提醒")
+                            sent = True
+                            break
+                        except Exception as e:
+                            logger.debug(f"尝试格式 {fmt} 失败: {e}")
+                    if sent:
                         break
+                # 最后尝试直接传 QQ 号
+                if not sent:
+                    try:
+                        await self.context.send_message(base, "⏰ 操作已超时，已退出交互。")
+                        logger.info(f"✅ 已向会话 {base} 发送超时提醒")
+                        sent = True
                     except Exception as e:
-                        logger.debug(f"尝试格式 {fmt} 失败: {e}")
+                        logger.debug(f"尝试纯数字 {base} 失败: {e}")
 
             if not sent:
                 logger.error(f"❌ 所有 session_id 格式均失败，无法发送超时提醒 (user_id={user_id})")
 
-            # 重置状态并清理任务
+            # 重置状态
             self._set_state(user_id, 'idle', admin_mode=False, tmp_data={}, in_menu=False)
             if user_id in self.timeout_tasks:
                 del self.timeout_tasks[user_id]
