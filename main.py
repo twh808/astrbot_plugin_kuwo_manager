@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终修复绑定流程数字消费问题"""
+    """酷我账号管理 - 最终稳定版（修复绑定 trigger_msg）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（最终修复版）已加载")
+        logger.info("✅ 酷我插件（最终稳定版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -480,7 +480,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
 
-    # ---------- 数字专用处理器（统一入口） ----------
+    # ---------- 数字专用处理器 ----------
     @filter.regex(r'^\d+$')
     async def handle_admin_digit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -540,7 +540,7 @@ class KuwoManagerPlugin(Star):
             else:
                 yield event.plain_result("❌ 无效选项，请输入 1-7 或 q")
         else:
-            # 子状态：调用对应的处理函数，它们返回字符串或生成器
+            # 子状态：调用对应的处理函数
             if current_state == 'admin_bind_wait_phone_select':
                 async for msg in self._admin_bind_phone_select_handle(event):
                     yield msg
@@ -569,7 +569,7 @@ class KuwoManagerPlugin(Star):
                 async for msg in self._admin_reset_select_handle(event):
                     yield msg
 
-    # ---------- 非数字通用处理器（处理确认状态） ----------
+    # ---------- 非数字通用处理器 ----------
     @filter.regex(r'^[^0-9].*$')
     async def handle_admin_final(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -721,10 +721,11 @@ class KuwoManagerPlugin(Star):
                 acc_count = len(self.cache[qq].get("accounts", []))
                 msg += f"{i}. {qq} ｜ 账号数: {acc_count}\n"
             msg += f"请输入要绑定到该手机号的QQ序号（或直接输入新QQ号）："
-            self._set_state(user_id, 'admin_bind_wait_qq_select', admin_mode=True, tmp_data={'selected_phone': selected_phone, 'qq_list': qq_list}, trigger_msg=current_text)
+            # 关键修复：进入 QQ 选择状态时，不传递 trigger_msg，避免用户输入的 QQ 序号被当作重复消息
+            self._set_state(user_id, 'admin_bind_wait_qq_select', admin_mode=True, tmp_data={'selected_phone': selected_phone, 'qq_list': qq_list})
             yield event.plain_result(msg)
         else:
-            self._set_state(user_id, 'admin_bind_wait_qq_input', admin_mode=True, tmp_data={'selected_phone': selected_phone}, trigger_msg=current_text)
+            self._set_state(user_id, 'admin_bind_wait_qq_input', admin_mode=True, tmp_data={'selected_phone': selected_phone})
             yield event.plain_result("当前无绑定记录，请输入要绑定的QQ号：")
 
     async def _admin_bind_qq_select_handle(self, event) -> str:
@@ -736,8 +737,7 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'admin_bind_wait_qq_select':
             return "状态错误，请重新操作"
         current_text = self._get_text(event)
-        if state_info.get('trigger_msg') == current_text:
-            return "请勿重复输入触发消息"
+        # 这里不再检查 trigger_msg，因为进入此状态时 trigger_msg 已被清空
         tmp = state_info.get('tmp_data', {})
         selected_phone = tmp.get('selected_phone')
         qq_list = tmp.get('qq_list', [])
@@ -765,8 +765,7 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'admin_bind_wait_qq_input':
             return "状态错误，请重新操作"
         current_text = self._get_text(event)
-        if state_info.get('trigger_msg') == current_text:
-            return "请勿重复输入触发消息"
+        # 同样不检查 trigger_msg
         if not current_text.isdigit():
             return "❌ QQ号须为数字"
         target_qq = current_text
