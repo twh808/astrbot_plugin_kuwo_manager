@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 增加解除绑定功能"""
+    """酷我账号管理 - 最终完整版（绑定/解除绑定相邻）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（增加解除绑定）已加载")
+        logger.info("✅ 酷我插件（最终完整版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -440,11 +440,11 @@ class KuwoManagerPlugin(Star):
             "[1] 查看所有绑定关系\n"
             "[2] 查看所有环境变量账号\n"
             "[3] 绑定账号（为QQ绑定手机号）\n"
-            "[4] 删除账号（从所有绑定和环境变量移除）\n"
-            "[5] 修改授权次数（增/减/设）\n"
-            "[6] 提现审核（扣减授权次数）\n"
-            "[7] 重置用户所有数据\n"
-            "[8] 解除绑定（从QQ移除绑定，保留环境变量）\n"
+            "[4] 解除绑定（从QQ移除绑定，保留环境变量）\n"
+            "[5] 删除账号（从所有绑定和环境变量移除）\n"
+            "[6] 修改授权次数（增/减/设）\n"
+            "[7] 提现审核（扣减授权次数）\n"
+            "[8] 重置用户所有数据\n"
             "[q] 退出"
         )
 
@@ -523,24 +523,24 @@ class KuwoManagerPlugin(Star):
                 async for msg in self._admin_bind_select_phone(event):
                     yield msg
             elif num == 4:
+                self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, tmp_data={})
+                async for msg in self._admin_unbind_select(event):
+                    yield msg
+            elif num == 5:
                 self._set_state(user_id, 'admin_delete_wait_select', admin_mode=True, tmp_data={})
                 async for msg in self._admin_delete_select(event):
                     yield msg
-            elif num == 5:
+            elif num == 6:
                 self._set_state(user_id, 'admin_auth_wait_select', admin_mode=True, tmp_data={})
                 async for msg in self._admin_auth_select(event):
                     yield msg
-            elif num == 6:
+            elif num == 7:
                 self._set_state(user_id, 'admin_withdraw_wait_select', admin_mode=True, tmp_data={})
                 async for msg in self._admin_withdraw_select(event):
                     yield msg
-            elif num == 7:
+            elif num == 8:
                 self._set_state(user_id, 'admin_reset_wait_select', admin_mode=True, tmp_data={})
                 async for msg in self._admin_reset_select(event):
-                    yield msg
-            elif num == 8:
-                self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, tmp_data={})
-                async for msg in self._admin_unbind_select(event):
                     yield msg
             else:
                 yield event.plain_result("❌ 无效选项，请输入 1-8 或 q")
@@ -561,11 +561,11 @@ class KuwoManagerPlugin(Star):
                 self._set_state(user_id, 'idle', admin_mode=True)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
-            elif current_state == 'admin_delete_wait_select':
-                async for msg in self._admin_delete_select_handle(event):
-                    yield msg
             elif current_state == 'admin_unbind_wait_select':
                 async for msg in self._admin_unbind_select_handle(event):
+                    yield msg
+            elif current_state == 'admin_delete_wait_select':
+                async for msg in self._admin_delete_select_handle(event):
                     yield msg
             elif current_state == 'admin_auth_wait_select':
                 async for msg in self._admin_auth_select_handle(event):
@@ -803,10 +803,9 @@ class KuwoManagerPlugin(Star):
             msg += f"\n⚠️ 注意：该手机号原本属于用户 {existing_owner}，已被管理员强制迁移至 {target_qq}"
         return msg
 
-    # ---------- 解除绑定子操作（新增） ----------
+    # ---------- 解除绑定子操作 ----------
     async def _admin_unbind_select(self, event):
         user_id = self._get_user_id(event)
-        # 列出所有已绑定的手机号（即环境变量中有且缓存中有QQ绑定的）
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
@@ -814,13 +813,11 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(menu)
             return
 
-        # 构建 phone -> qq 映射（从缓存中找）
         phone_to_qq = {}
         for qq, data in self.cache.items():
             for acc in data.get("accounts", []):
                 phone_to_qq[acc["phone"]] = qq
 
-        # 只保留有绑定的手机号（即 phone_to_qq 中存在）
         bound_list = []
         for entry in env_entries:
             phone = entry["phone"]
@@ -869,7 +866,6 @@ class KuwoManagerPlugin(Star):
         phone = item["phone"]
         qq = item["qq"]
 
-        # 从该 QQ 的 accounts 中移除该手机号
         cache_user = self._get_cache_user(qq)
         accounts = cache_user["accounts"]
         new_accounts = [acc for acc in accounts if acc["phone"] != phone]
