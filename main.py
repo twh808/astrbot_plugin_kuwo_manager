@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 智能绑定（长度阈值5）"""
+    """酷我账号管理 - 完整功能（含超时自动退出）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -31,9 +31,9 @@ class KuwoManagerPlugin(Star):
         self.cache = self._load_cache()
 
         self.state_info = {}
-        self.TIMEOUT = 120
+        self.TIMEOUT = 120  # 超时秒数
 
-        logger.info("✅ 酷我插件（绑定优化）已加载")
+        logger.info("✅ 酷我插件（超时版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -933,7 +933,6 @@ class KuwoManagerPlugin(Star):
         selected_phone = tmp.get('selected_phone')
         qq_list = tmp.get('qq_list', [])
 
-        # 长度阈值改为5：长度<=5优先作为序号，>5直接视为新QQ号
         if current_text.isdigit():
             if len(current_text) <= 5:
                 idx = int(current_text)
