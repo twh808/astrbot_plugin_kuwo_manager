@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 支持提交验证码（修复捕获顺序）"""
+    """酷我账号管理 - 智能绑定（长度阈值5）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -33,7 +33,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（验证码捕获顺序修复）已加载")
+        logger.info("✅ 酷我插件（绑定优化）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -411,7 +411,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("👋 已退出菜单")
             self._set_state(user_id, 'idle', admin_mode=False)
 
-    # ---------- 提交验证码：输入验证码（提前定义，优先捕获） ----------
+    # ---------- 提交验证码：输入验证码 ----------
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -932,16 +932,19 @@ class KuwoManagerPlugin(Star):
         tmp = state_info.get('tmp_data', {})
         selected_phone = tmp.get('selected_phone')
         qq_list = tmp.get('qq_list', [])
-        try:
-            idx = int(current_text)
-            if idx < 1 or idx > len(qq_list):
-                return f"❌ 序号无效，请输入 1 到 {len(qq_list)} 之间的数字，或直接输入新QQ号"
-            target_qq = qq_list[idx-1]
-        except ValueError:
-            if current_text.isdigit():
-                target_qq = current_text
+
+        # 长度阈值改为5：长度<=5优先作为序号，>5直接视为新QQ号
+        if current_text.isdigit():
+            if len(current_text) <= 5:
+                idx = int(current_text)
+                if 1 <= idx <= len(qq_list):
+                    target_qq = qq_list[idx-1]
+                else:
+                    return f"❌ 序号无效，请输入 1 到 {len(qq_list)} 之间的数字，或输入6位以上新QQ号"
             else:
-                return "❌ QQ号须为数字"
+                target_qq = current_text
+        else:
+            return "❌ 请输入数字（序号或新QQ号）"
 
         result = await self._admin_do_bind(target_qq, selected_phone)
         return result
