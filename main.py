@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 超时标记版（下一次交互提醒）"""
+    """酷我账号管理 - 超时标记版（可靠）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -293,7 +293,7 @@ class KuwoManagerPlugin(Star):
             'tmp_data': tmp_data or {},
             'trigger_msg': trigger_msg,
             'in_menu': in_menu,
-            'timeout_triggered': old.get('timeout_triggered', False),  # 保留超时标记
+            'timeout_triggered': old.get('timeout_triggered', False),
         }
 
     def _reset_admin_state(self, user_id: str):
@@ -305,9 +305,9 @@ class KuwoManagerPlugin(Star):
             info['in_menu'] = False
             info['timeout_triggered'] = False
 
-    # ---------- 超时标记检查 ----------
-    async def _check_timeout_and_send(self, event: AstrMessageEvent) -> bool:
-        """检查是否超时，若是则发送提醒并重置，返回 True 表示已处理（调用者应 return）"""
+    # ---------- 超时标记检查（普通异步函数，非生成器） ----------
+    async def _check_timeout(self, event: AstrMessageEvent) -> bool:
+        """检查是否超时，若是则发送提醒并重置，返回 True 表示已处理"""
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
         if info.get('timeout_triggered', False):
@@ -328,7 +328,7 @@ class KuwoManagerPlugin(Star):
     async def _timeout_callback(self, user_id: str):
         info = self._get_state_info(user_id)
         if info['in_menu'] or info['state'] != 'idle':
-            # 仅标记超时，不发送消息
+            # 仅标记超时，不发送消息（因为无法可靠发送）
             info['timeout_triggered'] = True
             # 重置状态（保留超时标记）
             info['state'] = 'idle'
@@ -396,8 +396,7 @@ class KuwoManagerPlugin(Star):
     # ---------- 全局 q 处理器 ----------
     @filter.regex(r'^[qQ]$')
     async def handle_global_q(self, event: AstrMessageEvent):
-        # 检查超时标记并处理
-        if (await self._check_timeout_and_send(event)):
+        if await self._check_timeout(event):
             return
 
         user_id = self._get_user_id(event)
@@ -436,8 +435,7 @@ class KuwoManagerPlugin(Star):
     # ---------- 普通用户菜单 ----------
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
-        # 检查超时
-        if (await self._check_timeout_and_send(event)):
+        if await self._check_timeout(event):
             return
 
         user_id = self._get_user_id(event)
@@ -454,8 +452,7 @@ class KuwoManagerPlugin(Star):
 
     @filter.regex(r'^[1-4rR]$')
     async def handle_menu_choice(self, event: AstrMessageEvent):
-        # 检查超时
-        if (await self._check_timeout_and_send(event)):
+        if await self._check_timeout(event):
             return
 
         user_id = self._get_user_id(event)
@@ -526,8 +523,7 @@ class KuwoManagerPlugin(Star):
     # ---------- 提交验证码：输入验证码 ----------
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
-        # 检查超时
-        if (await self._check_timeout_and_send(event)):
+        if await self._check_timeout(event):
             return
 
         user_id = self._get_user_id(event)
@@ -565,8 +561,7 @@ class KuwoManagerPlugin(Star):
     # ---------- 提交验证码：选择手机号 ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
-        # 检查超时
-        if (await self._check_timeout_and_send(event)):
+        if await self._check_timeout(event):
             return
 
         user_id = self._get_user_id(event)
@@ -594,8 +589,7 @@ class KuwoManagerPlugin(Star):
     # ---------- 提交账号（普通用户） ----------
     @filter.regex(r'^\d{11}#.+$')
     async def handle_phone_submit(self, event: AstrMessageEvent):
-        # 检查超时
-        if (await self._check_timeout_and_send(event)):
+        if await self._check_timeout(event):
             return
 
         user_id = self._get_user_id(event)
@@ -649,8 +643,7 @@ class KuwoManagerPlugin(Star):
     # ---------- 删除账号（普通用户） ----------
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
-        # 检查超时
-        if (await self._check_timeout_and_send(event)):
+        if await self._check_timeout(event):
             return
 
         user_id = self._get_user_id(event)
@@ -696,8 +689,7 @@ class KuwoManagerPlugin(Star):
     # ---------- 管理员交互 ----------
     @filter.command("酷我管理")
     async def admin_menu(self, event: AstrMessageEvent):
-        # 检查超时
-        if (await self._check_timeout_and_send(event)):
+        if await self._check_timeout(event):
             return
 
         user_id = self._get_user_id(event)
@@ -705,7 +697,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("❌ 你没有权限执行此操作")
             return
         state_info = self._get_state_info(user_id)
-        if state_info['state'] != 'idle' and not state_info.get('admin_mode', False):
+        if state_info.get('admin_mode', False):
             yield event.plain_result("👋 已退出普通用户菜单")
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
             self._cancel_timeout(user_id)
@@ -718,11 +710,11 @@ class KuwoManagerPlugin(Star):
     # ---------- 数字专用处理器（管理员） ----------
     @filter.regex(r'^\d+$')
     async def handle_admin_digit(self, event: AstrMessageEvent):
+        if await self._check_timeout(event):
+            return
+
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
-            return
-        # 检查超时
-        if (await self._check_timeout_and_send(event)):
             return
         state_info = self._get_state_info(user_id)
         if not state_info.get('admin_mode', False) or not state_info.get('in_menu', False):
@@ -859,11 +851,11 @@ class KuwoManagerPlugin(Star):
     # ---------- 非数字通用处理器（管理员） ----------
     @filter.regex(r'^[^0-9].*$')
     async def handle_admin_non_digit(self, event: AstrMessageEvent):
+        if await self._check_timeout(event):
+            return
+
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
-            return
-        # 检查超时
-        if (await self._check_timeout_and_send(event)):
             return
         state_info = self._get_state_info(user_id)
         if not state_info.get('admin_mode', False) or not state_info.get('in_menu', False):
@@ -1427,11 +1419,11 @@ class KuwoManagerPlugin(Star):
 
     @filter.regex(r'^\d+$')
     async def handle_admin_withdraw_amount(self, event: AstrMessageEvent):
+        if await self._check_timeout(event):
+            return
+
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
-            return
-        # 检查超时
-        if (await self._check_timeout_and_send(event)):
             return
         state_info = self._get_state_info(user_id)
         if state_info['state'] != 'admin_withdraw_wait_amount' or not state_info.get('in_menu', False):
