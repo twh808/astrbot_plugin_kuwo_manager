@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 修复 session_id 格式（private/group）"""
+    """酷我账号管理 - 最终修复版（使用框架 session_id）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（session格式修复）已加载")
+        logger.info("✅ 酷我插件（最终修复）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -254,13 +254,20 @@ class KuwoManagerPlugin(Star):
         return "unknown"
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取符合 aiocqhttp 要求的 session_id（格式：aiocqhttp:private/group:user_id）"""
-        user_id = self._get_user_id(event)
-        # 判断群聊还是私聊
-        if hasattr(event, 'group_id') and event.group_id:
-            return f"aiocqhttp:group:{user_id}"
-        else:
-            return f"aiocqhttp:private:{user_id}"
+        """完全依赖框架提供的 session_id"""
+        if hasattr(event, 'get_session_id'):
+            sid = event.get_session_id()
+            if sid and isinstance(sid, str) and sid:
+                return sid
+        if hasattr(event, 'session_id'):
+            sid = event.session_id
+            if sid and isinstance(sid, str) and sid:
+                return sid
+        if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'session_id'):
+            sid = event.message_obj.session_id
+            if sid and isinstance(sid, str) and sid:
+                return sid
+        return None
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
