@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 主动超时提醒"""
+    """酷我账号管理 - 主动超时提醒（修复版）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -33,14 +33,9 @@ class KuwoManagerPlugin(Star):
 
         self.state_info = {}
         self.TIMEOUT = 120
-        # 存储每个用户的超时任务
         self.timeout_tasks = {}
 
         logger.info("✅ 酷我插件（主动超时版）已加载")
-        if self.admin_qqs:
-            logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
-        else:
-            logger.warning("⚠️ 未配置管理员QQ，管理功能不可用")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -286,7 +281,6 @@ class KuwoManagerPlugin(Star):
                 'timeout_triggered': False
             }
         info = self.state_info[user_id]
-        # 超时由定时任务处理，这里只标记
         return info
 
     def _set_state(self, user_id: str, state: str, admin_mode: bool = False, tmp_data: dict = None, trigger_msg: str = None, in_menu: bool = False):
@@ -311,12 +305,11 @@ class KuwoManagerPlugin(Star):
 
     # ---------- 超时任务管理 ----------
     async def _timeout_callback(self, user_id: str):
-        """超时回调：发送超时通知并重置状态"""
+        """超时回调：主动发送超时通知并重置状态"""
         info = self._get_state_info(user_id)
-        # 检查是否还在交互状态（in_menu=True 或 state 不是 idle）
         if info['in_menu'] or info['state'] != 'idle':
-            # 发送超时消息
             try:
+                # 主动发送消息
                 await self.context.send_message(user_id, "⏰ 操作已超时，已退出交互。")
                 logger.info(f"已向用户 {user_id} 发送超时提醒")
             except Exception as e:
@@ -329,26 +322,20 @@ class KuwoManagerPlugin(Star):
 
     def _schedule_timeout(self, user_id: str):
         """安排或重置超时任务"""
-        # 取消旧任务
         if user_id in self.timeout_tasks:
             self.timeout_tasks[user_id].cancel()
             del self.timeout_tasks[user_id]
-        # 创建新任务
         task = asyncio.create_task(self._timeout_after_delay(user_id))
         self.timeout_tasks[user_id] = task
 
     async def _timeout_after_delay(self, user_id: str):
-        """等待指定时间后执行超时回调"""
         try:
             await asyncio.sleep(self.TIMEOUT)
-            # 执行超时回调
             await self._timeout_callback(user_id)
         except asyncio.CancelledError:
-            # 任务被取消，不执行回调
             pass
 
     def _cancel_timeout(self, user_id: str):
-        """取消超时任务"""
         if user_id in self.timeout_tasks:
             self.timeout_tasks[user_id].cancel()
             del self.timeout_tasks[user_id]
@@ -494,7 +481,6 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(menu)
             return
 
-        # 立即重置状态，防止重复处理
         self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
         self._cancel_timeout(user_id)
 
@@ -804,7 +790,6 @@ class KuwoManagerPlugin(Star):
             else:
                 yield event.plain_result("❌ 无效选项，请输入 1-8 或 q")
         else:
-            # 子状态
             if current_state == 'admin_bind_wait_phone_select':
                 async for msg in self._admin_bind_phone_select_handle(event):
                     yield msg
