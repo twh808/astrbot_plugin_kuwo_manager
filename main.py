@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 超时主动回复（使用原始 session 对象）"""
+    """酷我账号管理 - 超时主动发送（使用 str(session)）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（超时主动回复最终版）已加载")
+        logger.info("✅ 酷我插件（超时主动发送最终版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -250,16 +250,33 @@ class KuwoManagerPlugin(Star):
         if hasattr(event, 'sender_id'):
             return event.sender_id
         if hasattr(event, 'get_session_id'):
-            # 如果 get_session_id 返回的是对象，但此处需要字符串，我们尝试获取其字符串表示？不，我们直接返回 user_id
             return str(event.get_session_id())
         return "unknown"
 
-    # ----- 关键修复：返回原始 session 对象，而非构造字符串 -----
-    def _get_session_obj(self, event: AstrMessageEvent):
-        """获取框架原生 session 对象（用于 context.send_message）"""
+    # ----- 关键：获取 session 字符串（框架可识别） -----
+    def _get_session_str(self, event: AstrMessageEvent) -> str:
+        """返回可用的 session 字符串"""
+        # 先尝试 event.session_id（如果存在）
+        if hasattr(event, 'session_id'):
+            sid = event.session_id
+            if isinstance(sid, str) and sid:
+                return sid
+        # 调用 get_session_id 并转为字符串
         if hasattr(event, 'get_session_id'):
-            return event.get_session_id()
-        return None
+            try:
+                sid = event.get_session_id()
+                if sid:
+                    return str(sid)
+            except:
+                pass
+        # 回退构造（但通常不会用到）
+        user_id = self._get_user_id(event)
+        # 尝试几种常见格式，按可能性排序
+        for platform in ['onebot', 'aiocqhttp']:
+            for msg_type in ['private', 'friend']:
+                candidate = f"{platform}:{msg_type}:{user_id}"
+                return candidate  # 直接返回第一个，实际可尝试更多
+        return f"onebot:private:{user_id}"
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
@@ -287,14 +304,13 @@ class KuwoManagerPlugin(Star):
                 'trigger_msg': None,
                 'in_menu': False,
                 'timeout_triggered': False,
-                'session_obj': None,   # 存储原始 session 对象
-                'session_id': None     # 保留原字符串（备用）
+                'session_id': None,      # 存储字符串形式的 session
             }
         return self.state_info[user_id]
 
     def _set_state(self, user_id: str, state: str, admin_mode: bool = False,
                    tmp_data: dict = None, trigger_msg: str = None,
-                   in_menu: bool = False, session_obj=None, session_id: str = None):
+                   in_menu: bool = False, session_id: str = None):
         old = self.state_info.get(user_id, {})
         self.state_info[user_id] = {
             'state': state,
@@ -304,7 +320,6 @@ class KuwoManagerPlugin(Star):
             'trigger_msg': trigger_msg,
             'in_menu': in_menu,
             'timeout_triggered': False,
-            'session_obj': session_obj if session_obj is not None else old.get('session_obj'),
             'session_id': session_id if session_id is not None else old.get('session_id')
         }
 
@@ -316,42 +331,28 @@ class KuwoManagerPlugin(Star):
             info['trigger_msg'] = None
             info['in_menu'] = False
             info['timeout_triggered'] = False
-            # 清空 session 对象，但保留以备后续？
-            info['session_obj'] = None
 
     # ---------- 超时任务管理 ----------
     async def _timeout_callback(self, user_id: str):
         info = self._get_state_info(user_id)
         if info['in_menu'] or info['state'] != 'idle':
-            # 优先使用原始 session 对象
-            session_obj = info.get('session_obj')
+            sid = info.get('session_id')
             sent = False
-            if session_obj:
+            if sid:
                 try:
-                    await self.context.send_message(session_obj, "⏰ 操作已超时，已退出交互。")
-                    logger.info(f"✅ 已通过原始 session 对象发送超时提醒给用户 {user_id}")
+                    await self.context.send_message(sid, "⏰ 操作已超时，已退出交互。")
+                    logger.info(f"✅ 已通过 session_id 字符串 '{sid}' 发送超时提醒")
                     sent = True
                 except Exception as e:
-                    logger.warning(f"使用原始 session 对象发送失败: {e}")
+                    logger.warning(f"使用 session_id '{sid}' 发送失败: {e}")
 
-            # 备用：尝试字符串形式的 session_id（如果存在）
+            # 若失败，尝试常见格式（可能 sid 不正确）
             if not sent:
-                sid = info.get('session_id')
-                if sid:
-                    try:
-                        await self.context.send_message(sid, "⏰ 操作已超时，已退出交互。")
-                        logger.info(f"✅ 已通过 session_id 字符串发送超时提醒")
-                        sent = True
-                    except Exception as e:
-                        logger.debug(f"session_id 字符串发送失败: {e}")
-
-            # 最后尝试常见格式（穷举）
-            if not sent:
-                # 从 user_id 构造
-                platforms = ['aiocqhttp', 'onebot', 'qq', 'go-cqhttp']
-                types = ['private', 'friend', 'user']
+                # 从 user_id 构造多种可能
+                platforms = ['onebot', 'aiocqhttp', 'qq', 'go-cqhttp']
+                msg_types = ['private', 'friend', 'user']
                 for platform in platforms:
-                    for msg_type in types:
+                    for msg_type in msg_types:
                         candidate = f"{platform}:{msg_type}:{user_id}"
                         try:
                             await self.context.send_message(candidate, "⏰ 操作已超时，已退出交互。")
@@ -364,7 +365,7 @@ class KuwoManagerPlugin(Star):
                         break
 
             if not sent:
-                logger.error(f"❌ 所有方式均失败，无法发送超时提醒 (user_id={user_id})")
+                logger.error(f"❌ 所有 session_id 格式均失败，无法发送超时提醒 (user_id={user_id})")
 
             # 重置状态
             self._set_state(user_id, 'idle', admin_mode=False, tmp_data={}, in_menu=False)
@@ -454,15 +455,15 @@ class KuwoManagerPlugin(Star):
         if in_menu and current_state not in ['idle', 'menu_idle', 'admin_menu_idle']:
             if admin_mode:
                 yield event.plain_result("👋 已取消操作，返回管理面板")
-                session_obj = self._get_session_obj(event)
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                session_id = self._get_session_str(event)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
             else:
                 yield event.plain_result("👋 已取消操作，返回菜单")
-                session_obj = self._get_session_obj(event)
-                self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+                session_id = self._get_session_str(event)
+                self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_menu_text(user_id)
                 yield event.plain_result(menu)
@@ -483,8 +484,8 @@ class KuwoManagerPlugin(Star):
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
             self._cancel_timeout(user_id)
         self._reset_admin_state(user_id)
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
@@ -506,8 +507,8 @@ class KuwoManagerPlugin(Star):
         text = self._get_text(event).lower()
 
         if text == '1':
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'waiting_phone', admin_mode=False, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'waiting_phone', admin_mode=False, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             yield event.plain_result("请输入手机号#密码（例如：13800138000#mypassword）（发送 q 取消）")
         elif text == '2':
@@ -518,8 +519,8 @@ class KuwoManagerPlugin(Star):
                 lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
                 prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）（发送 q 取消）："
                 yield event.plain_result(prompt)
-                session_obj = self._get_session_obj(event)
-                self._set_state(user_id, 'waiting_delete', admin_mode=False, trigger_msg=text, in_menu=True, session_obj=session_obj)
+                session_id = self._get_session_str(event)
+                self._set_state(user_id, 'waiting_delete', admin_mode=False, trigger_msg=text, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
         elif text == '3':
             my_env_entries = await self._get_my_env_entries(user_id)
@@ -541,8 +542,8 @@ class KuwoManagerPlugin(Star):
                 else:
                     msg += f"合计可用次数：{total}"
                 yield event.plain_result(msg)
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
@@ -554,14 +555,14 @@ class KuwoManagerPlugin(Star):
                 lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
                 prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号（发送 q 取消）："
                 yield event.plain_result(prompt)
-                session_obj = self._get_session_obj(event)
-                self._set_state(user_id, 'waiting_code_phone', admin_mode=False, trigger_msg=text, in_menu=True, session_obj=session_obj)
+                session_id = self._get_session_str(event)
+                self._set_state(user_id, 'waiting_code_phone', admin_mode=False, trigger_msg=text, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
         elif text == 'r':
             await self._reset_user_data(user_id)
             yield event.plain_result("✅ 您的所有数据已重置")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
@@ -587,8 +588,8 @@ class KuwoManagerPlugin(Star):
         phone = state_info.get('tmp_data', {}).get('phone')
         if not phone:
             yield event.plain_result("❌ 会话错误，请重新操作")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
@@ -602,8 +603,8 @@ class KuwoManagerPlugin(Star):
         else:
             yield event.plain_result("❌ 提交验证码失败，请稍后重试")
 
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
@@ -634,8 +635,8 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(my_acc)} 之间的数字")
             return
         phone = my_acc[idx-1]["phone"]
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'waiting_code_input', admin_mode=False, tmp_data={'phone': phone}, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'waiting_code_input', admin_mode=False, tmp_data={'phone': phone}, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
@@ -659,8 +660,8 @@ class KuwoManagerPlugin(Star):
 
         if self._is_phone_owned_by_other(user_id, phone):
             yield event.plain_result(f"❌ 手机号 {phone} 已被其他用户绑定")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
@@ -691,8 +692,8 @@ class KuwoManagerPlugin(Star):
             await self._save_all_env_entries(env_entries)
             yield event.plain_result(f"✅ 账号 {phone} 已保存（默认无限制）")
 
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
@@ -716,8 +717,8 @@ class KuwoManagerPlugin(Star):
             idx = int(current_text)
         except:
             yield event.plain_result("❌ 请输入有效的数字")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
@@ -727,8 +728,8 @@ class KuwoManagerPlugin(Star):
         my_acc = cache_user["accounts"]
         if idx < 1 or idx > len(my_acc):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(my_acc)} 之间的数字")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
@@ -742,8 +743,8 @@ class KuwoManagerPlugin(Star):
         await self._save_all_env_entries(env_entries)
 
         yield event.plain_result(f"✅ 已删除账号 {phone_to_del}")
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
@@ -766,8 +767,8 @@ class KuwoManagerPlugin(Star):
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
             self._cancel_timeout(user_id)
         self._reset_admin_state(user_id)
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
@@ -801,8 +802,8 @@ class KuwoManagerPlugin(Star):
             phone = state_info.get('tmp_data', {}).get('phone')
             if not phone:
                 yield event.plain_result("❌ 会话错误，请重新操作")
-                session_obj = self._get_session_obj(event)
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                session_id = self._get_session_str(event)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
@@ -819,8 +820,8 @@ class KuwoManagerPlugin(Star):
                     break
             if not found:
                 yield event.plain_result(f"❌ 手机号 {phone} 不存在于环境变量中")
-                session_obj = self._get_session_obj(event)
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                session_id = self._get_session_str(event)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
@@ -829,78 +830,78 @@ class KuwoManagerPlugin(Star):
                 yield event.plain_result(f"✅ 手机号 {phone} 授权次数已设置为 {num}")
             else:
                 yield event.plain_result("❌ 保存失败")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
 
         if current_state == 'admin_menu_idle':
-            session_obj = self._get_session_obj(event)
+            session_id = self._get_session_str(event)
             if num == 1:
                 result = await self._admin_view_all_bindings()
                 yield event.plain_result(result)
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
             elif num == 2:
                 result = await self._admin_view_all_env_accounts()
                 yield event.plain_result(result)
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
             elif num == 3:
-                self._set_state(user_id, 'admin_bind_wait_phone_select', admin_mode=True, in_menu=True, tmp_data={}, session_obj=session_obj)
+                self._set_state(user_id, 'admin_bind_wait_phone_select', admin_mode=True, in_menu=True, tmp_data={}, session_id=session_id)
                 self._schedule_timeout(user_id)
                 async for msg in self._admin_bind_select_phone(event):
                     yield msg
             elif num == 4:
-                self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, in_menu=True, tmp_data={}, session_obj=session_obj)
+                self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, in_menu=True, tmp_data={}, session_id=session_id)
                 self._schedule_timeout(user_id)
                 async for msg in self._admin_unbind_select(event):
                     yield msg
             elif num == 5:
-                self._set_state(user_id, 'admin_delete_wait_select', admin_mode=True, in_menu=True, tmp_data={}, session_obj=session_obj)
+                self._set_state(user_id, 'admin_delete_wait_select', admin_mode=True, in_menu=True, tmp_data={}, session_id=session_id)
                 self._schedule_timeout(user_id)
                 async for msg in self._admin_delete_select(event):
                     yield msg
             elif num == 6:
-                self._set_state(user_id, 'admin_auth_wait_select', admin_mode=True, in_menu=True, tmp_data={}, session_obj=session_obj)
+                self._set_state(user_id, 'admin_auth_wait_select', admin_mode=True, in_menu=True, tmp_data={}, session_id=session_id)
                 self._schedule_timeout(user_id)
                 async for msg in self._admin_auth_select(event):
                     yield msg
             elif num == 7:
-                self._set_state(user_id, 'admin_withdraw_wait_select', admin_mode=True, in_menu=True, tmp_data={}, session_obj=session_obj)
+                self._set_state(user_id, 'admin_withdraw_wait_select', admin_mode=True, in_menu=True, tmp_data={}, session_id=session_id)
                 self._schedule_timeout(user_id)
                 async for msg in self._admin_withdraw_select(event):
                     yield msg
             elif num == 8:
-                self._set_state(user_id, 'admin_reset_wait_select', admin_mode=True, in_menu=True, tmp_data={}, session_obj=session_obj)
+                self._set_state(user_id, 'admin_reset_wait_select', admin_mode=True, in_menu=True, tmp_data={}, session_id=session_id)
                 self._schedule_timeout(user_id)
                 async for msg in self._admin_reset_select(event):
                     yield msg
             else:
                 yield event.plain_result("❌ 无效选项，请输入 1-8 或 q")
         else:
-            # 子状态（所有子状态操作均传入 session_obj）
-            session_obj = self._get_session_obj(event)
+            # 子状态
+            session_id = self._get_session_str(event)
             if current_state == 'admin_bind_wait_phone_select':
                 async for msg in self._admin_bind_phone_select_handle(event):
                     yield msg
             elif current_state == 'admin_bind_wait_qq_select':
                 result = await self._admin_bind_qq_select_handle(event)
                 yield event.plain_result(result)
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
             elif current_state == 'admin_bind_wait_qq_input':
                 result = await self._admin_bind_qq_input_handle(event)
                 yield event.plain_result(result)
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
@@ -939,12 +940,12 @@ class KuwoManagerPlugin(Star):
         text = self._get_text(event).strip()
 
         if current_state == 'admin_auth_wait_new_value':
-            session_obj = self._get_session_obj(event)
+            session_id = self._get_session_str(event)
             if text in ['无限制', '无限', 'unlimited']:
                 phone = state_info.get('tmp_data', {}).get('phone')
                 if not phone:
                     yield event.plain_result("❌ 会话错误，请重新操作")
-                    self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                    self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                     self._schedule_timeout(user_id)
                     menu = await self._get_admin_menu_text()
                     yield event.plain_result(menu)
@@ -958,7 +959,7 @@ class KuwoManagerPlugin(Star):
                         break
                 if not found:
                     yield event.plain_result(f"❌ 手机号 {phone} 不存在于环境变量中")
-                    self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                    self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                     self._schedule_timeout(user_id)
                     menu = await self._get_admin_menu_text()
                     yield event.plain_result(menu)
@@ -967,7 +968,7 @@ class KuwoManagerPlugin(Star):
                     yield event.plain_result(f"✅ 手机号 {phone} 已设为无限制")
                 else:
                     yield event.plain_result("❌ 保存失败")
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
@@ -976,7 +977,7 @@ class KuwoManagerPlugin(Star):
             return
 
         if current_state == 'admin_delete_wait_confirm':
-            session_obj = self._get_session_obj(event)
+            session_id = self._get_session_str(event)
             if text.lower() == 'y':
                 phone_to_del = state_info.get('tmp_data', {}).get('phone_to_del')
                 if not phone_to_del:
@@ -984,19 +985,19 @@ class KuwoManagerPlugin(Star):
                 else:
                     result = await self._admin_do_delete(phone_to_del)
                     yield event.plain_result(result)
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
             elif text.lower() == 'n':
                 yield event.plain_result("❌ 已取消删除操作")
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
             else:
                 yield event.plain_result("❌ 已取消删除操作")
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                 self._schedule_timeout(user_id)
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
@@ -1055,8 +1056,8 @@ class KuwoManagerPlugin(Star):
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号，请先让用户提交账号或手动添加")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
@@ -1069,8 +1070,8 @@ class KuwoManagerPlugin(Star):
         unbound_phones = [entry for entry in env_entries if entry["phone"] not in bound_phones]
         if not unbound_phones:
             yield event.plain_result("✅ 所有环境变量账号均已绑定，无需操作")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
@@ -1081,8 +1082,8 @@ class KuwoManagerPlugin(Star):
             auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
             msg += f"{idx}. {entry['phone']} ｜ 授权次数: {auth_display}\n"
         msg += "请选择要绑定的手机号序号（发送 q 取消）："
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_bind_wait_phone_select', admin_mode=True, in_menu=True, tmp_data={'unbound_phones': unbound_phones}, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_bind_wait_phone_select', admin_mode=True, in_menu=True, tmp_data={'unbound_phones': unbound_phones}, session_id=session_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
 
@@ -1111,18 +1112,18 @@ class KuwoManagerPlugin(Star):
 
         selected_phone = unbound_phones[idx-1]["phone"]
         qq_list = list(self.cache.keys())
-        session_obj = self._get_session_obj(event)
+        session_id = self._get_session_str(event)
         if qq_list:
             msg = "📋 可绑定的QQ列表：\n"
             for i, qq in enumerate(qq_list, 1):
                 acc_count = len(self.cache[qq].get("accounts", []))
                 msg += f"{i}. {qq} ｜ 账号数: {acc_count}\n"
             msg += f"请输入要绑定到该手机号的QQ序号（或直接输入新QQ号，发送 q 取消）："
-            self._set_state(user_id, 'admin_bind_wait_qq_select', admin_mode=True, in_menu=True, tmp_data={'selected_phone': selected_phone, 'qq_list': qq_list}, session_obj=session_obj)
+            self._set_state(user_id, 'admin_bind_wait_qq_select', admin_mode=True, in_menu=True, tmp_data={'selected_phone': selected_phone, 'qq_list': qq_list}, session_id=session_id)
             self._schedule_timeout(user_id)
             yield event.plain_result(msg)
         else:
-            self._set_state(user_id, 'admin_bind_wait_qq_input', admin_mode=True, in_menu=True, tmp_data={'selected_phone': selected_phone}, session_obj=session_obj)
+            self._set_state(user_id, 'admin_bind_wait_qq_input', admin_mode=True, in_menu=True, tmp_data={'selected_phone': selected_phone}, session_id=session_id)
             self._schedule_timeout(user_id)
             yield event.plain_result("当前无绑定记录，请输入要绑定的QQ号（发送 q 取消）：")
 
@@ -1151,8 +1152,8 @@ class KuwoManagerPlugin(Star):
             return "❌ 请输入数字（序号或新QQ号）"
 
         result = await self._admin_do_bind(target_qq, selected_phone)
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         return result
 
@@ -1171,8 +1172,8 @@ class KuwoManagerPlugin(Star):
         if not selected_phone:
             return "❌ 会话错误，请重新操作"
         result = await self._admin_do_bind(target_qq, selected_phone)
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         return result
 
@@ -1213,8 +1214,8 @@ class KuwoManagerPlugin(Star):
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
@@ -1237,8 +1238,8 @@ class KuwoManagerPlugin(Star):
 
         if not bound_list:
             yield event.plain_result("✅ 没有已绑定的账号需要解除")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
@@ -1249,8 +1250,8 @@ class KuwoManagerPlugin(Star):
             auth_display = "无限制" if item["auth_count"] is None else str(item["auth_count"])
             msg += f"{idx}. {item['phone']} ｜ 授权: {auth_display} ｜ 绑定QQ: {item['qq']}\n"
         msg += "请输入要解除绑定的账号序号（发送 q 取消）："
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, in_menu=True, tmp_data={'bound_list': bound_list}, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, in_menu=True, tmp_data={'bound_list': bound_list}, session_id=session_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
 
@@ -1285,16 +1286,16 @@ class KuwoManagerPlugin(Star):
         new_accounts = [acc for acc in accounts if acc["phone"] != phone]
         if len(new_accounts) == len(accounts):
             yield event.plain_result(f"❌ 手机号 {phone} 不在用户 {qq} 的绑定列表中")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
         self._update_cache_user(qq, new_accounts)
         yield event.plain_result(f"✅ 已解除绑定：手机号 {phone} 从 QQ {qq} 移除（环境变量中的账号保留）")
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
@@ -1314,8 +1315,8 @@ class KuwoManagerPlugin(Star):
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
@@ -1334,8 +1335,8 @@ class KuwoManagerPlugin(Star):
                     break
             msg += f"{idx}. {phone} ｜ 授权: {auth_display} ｜ 绑定QQ: {bound_qq}\n"
         msg += "请输入要删除的账号序号（发送 q 取消）："
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_delete_wait_select', admin_mode=True, in_menu=True, tmp_data={'env_entries': env_entries}, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_delete_wait_select', admin_mode=True, in_menu=True, tmp_data={'env_entries': env_entries}, session_id=session_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
 
@@ -1362,8 +1363,8 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone_to_del = env_entries[idx-1]["phone"]
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_delete_wait_confirm', admin_mode=True, in_menu=True, tmp_data={'phone_to_del': phone_to_del}, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_delete_wait_confirm', admin_mode=True, in_menu=True, tmp_data={'phone_to_del': phone_to_del}, session_id=session_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(f"⚠️ 确认删除该账号（{phone_to_del}）吗？回复 y 确认，n 取消，数字忽略。")
 
@@ -1400,8 +1401,8 @@ class KuwoManagerPlugin(Star):
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
@@ -1411,8 +1412,8 @@ class KuwoManagerPlugin(Star):
             auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
             msg += f"{idx}. {entry['phone']} ｜ 授权: {auth_display}\n"
         msg += "请输入要修改授权次数的账号序号（发送 q 取消）："
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_auth_wait_select', admin_mode=True, in_menu=True, tmp_data={'env_entries': env_entries}, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_auth_wait_select', admin_mode=True, in_menu=True, tmp_data={'env_entries': env_entries}, session_id=session_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
 
@@ -1439,8 +1440,8 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone = env_entries[idx-1]["phone"]
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_auth_wait_new_value', admin_mode=True, in_menu=True, tmp_data={'phone': phone}, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_auth_wait_new_value', admin_mode=True, in_menu=True, tmp_data={'phone': phone}, session_id=session_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入新的授权次数（数字）或输入 '无限制'（发送 q 取消）：")
 
@@ -1459,8 +1460,8 @@ class KuwoManagerPlugin(Star):
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
@@ -1470,8 +1471,8 @@ class KuwoManagerPlugin(Star):
             auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
             msg += f"{idx}. {entry['phone']} ｜ 授权: {auth_display}\n"
         msg += "请输入要提现扣减的账号序号（发送 q 取消）："
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_withdraw_wait_select', admin_mode=True, in_menu=True, tmp_data={'env_entries': env_entries}, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_withdraw_wait_select', admin_mode=True, in_menu=True, tmp_data={'env_entries': env_entries}, session_id=session_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
 
@@ -1502,15 +1503,15 @@ class KuwoManagerPlugin(Star):
             if entry["phone"] == phone:
                 if entry["auth_count"] is None:
                     yield event.plain_result(f"❌ 账号 {phone} 为无限制，无法提现扣减")
-                    session_obj = self._get_session_obj(event)
-                    self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+                    session_id = self._get_session_str(event)
+                    self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
                     self._schedule_timeout(user_id)
                     menu = await self._get_admin_menu_text()
                     yield event.plain_result(menu)
                     return
                 break
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_withdraw_wait_amount', admin_mode=True, in_menu=True, tmp_data={'phone': phone}, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_withdraw_wait_amount', admin_mode=True, in_menu=True, tmp_data={'phone': phone}, session_id=session_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入要提现扣减的数量（正整数，发送 q 取消）：")
 
@@ -1541,16 +1542,16 @@ class KuwoManagerPlugin(Star):
         phone = state_info.get('tmp_data', {}).get('phone')
         if not phone:
             yield event.plain_result("❌ 会话错误，请重新操作")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
         result = await self._admin_do_withdraw(phone, amount)
         yield event.plain_result(result)
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
@@ -1587,8 +1588,8 @@ class KuwoManagerPlugin(Star):
         qq_list = [qq for qq, data in self.cache.items() if data.get("accounts")]
         if not qq_list:
             yield event.plain_result("📭 暂无任何用户绑定数据")
-            session_obj = self._get_session_obj(event)
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+            session_id = self._get_session_str(event)
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
             self._schedule_timeout(user_id)
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
@@ -1598,8 +1599,8 @@ class KuwoManagerPlugin(Star):
             acc_count = len(self.cache[qq].get("accounts", []))
             msg += f"{idx}. {qq} ｜ 账号数: {acc_count}\n"
         msg += "请输入要重置的QQ序号（发送 q 取消）："
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_reset_wait_select', admin_mode=True, in_menu=True, tmp_data={'qq_list': qq_list}, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_reset_wait_select', admin_mode=True, in_menu=True, tmp_data={'qq_list': qq_list}, session_id=session_id)
         self._schedule_timeout(user_id)
         yield event.plain_result(msg)
 
@@ -1628,8 +1629,8 @@ class KuwoManagerPlugin(Star):
         target_qq = qq_list[idx-1]
         await self._reset_user_data(target_qq)
         yield event.plain_result(f"✅ 已重置用户 {target_qq} 的所有数据")
-        session_obj = self._get_session_obj(event)
-        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_obj=session_obj)
+        session_id = self._get_session_str(event)
+        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
