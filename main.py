@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终稳定版（主动超时提醒）"""
+    """酷我账号管理 - 最终稳定版（正确 session_id）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -254,12 +254,12 @@ class KuwoManagerPlugin(Star):
         return "unknown"
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """根据框架实际要求，返回 aiocqhttp:用户ID:friend（私聊）或 aiocqhttp:用户ID:group（群聊）"""
+        """返回 aiocqhttp:friend:user_id（私聊）或 aiocqhttp:group:user_id（群聊）"""
         user_id = self._get_user_id(event)
         if hasattr(event, 'group_id') and event.group_id:
-            return f"aiocqhttp:{user_id}:group"
+            return f"aiocqhttp:group:{user_id}"
         else:
-            return f"aiocqhttp:{user_id}:friend"
+            return f"aiocqhttp:friend:{user_id}"
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
