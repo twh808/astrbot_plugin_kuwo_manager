@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终完整版（绑定/解除绑定相邻）"""
+    """酷我账号管理 - 支持 auth_count 为 None 表示无限制"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（最终完整版）已加载")
+        logger.info("✅ 酷我插件（无限制支持）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -123,8 +123,9 @@ class KuwoManagerPlugin(Star):
             result = await self._call_api(f"envs/{env_id}", method="PUT", data=payload)
         return result.get("code") in [0, None, ""] and not result.get("error")
 
-    # ---------- 环境变量读写 ----------
+    # ---------- 环境变量读写（支持无限制） ----------
     async def _get_all_env_entries(self) -> list:
+        """返回条目列表，auth_count 可能为 int 或 None（无限制）"""
         value = ""
         env_id = await self._get_env_id_by_name(self.env_name)
         if env_id:
@@ -145,7 +146,12 @@ class KuwoManagerPlugin(Star):
             if len(parts) >= 2:
                 phone = parts[0].strip()
                 password = parts[1].strip()
-                auth_count = int(parts[2].strip()) if len(parts) >= 3 else 0
+                auth_count = None
+                if len(parts) >= 3 and parts[2].strip():
+                    try:
+                        auth_count = int(parts[2].strip())
+                    except:
+                        auth_count = None
                 entries.append({"phone": phone, "password": password, "auth_count": auth_count})
         return entries
 
@@ -153,7 +159,12 @@ class KuwoManagerPlugin(Star):
         if not entries:
             new_value = ""
         else:
-            lines = [f"{e['phone']}#{e['password']}#{e['auth_count']}" for e in entries]
+            lines = []
+            for e in entries:
+                if e["auth_count"] is None:
+                    lines.append(f"{e['phone']}#{e['password']}")
+                else:
+                    lines.append(f"{e['phone']}#{e['password']}#{e['auth_count']}")
             new_value = '\n'.join(lines)
         return await self._update_env_value(self.env_name, new_value)
 
@@ -166,9 +177,17 @@ class KuwoManagerPlugin(Star):
         my_phones = [acc["phone"] for acc in await self._get_my_accounts(user_id)]
         return [entry for entry in all_entries if entry["phone"] in my_phones]
 
-    async def _get_user_total_auth(self, user_id: str) -> int:
+    async def _get_user_total_auth(self, user_id: str) -> tuple:
+        """返回 (total, has_unlimited)"""
         my_entries = await self._get_my_env_entries(user_id)
-        return sum(entry["auth_count"] for entry in my_entries)
+        total = 0
+        has_unlimited = False
+        for entry in my_entries:
+            if entry["auth_count"] is None:
+                has_unlimited = True
+            else:
+                total += entry["auth_count"]
+        return total, has_unlimited
 
     def _is_phone_owned_by_other(self, user_id: str, phone: str) -> bool:
         for qq, data in self.cache.items():
@@ -261,10 +280,14 @@ class KuwoManagerPlugin(Star):
     async def _get_menu_text(self, user_id: str) -> str:
         my_acc = await self._get_my_accounts(user_id)
         count = len(my_acc)
-        total_auth = await self._get_user_total_auth(user_id)
+        total, has_unlimited = await self._get_user_total_auth(user_id)
+        if has_unlimited:
+            total_display = "不限"
+        else:
+            total_display = str(total)
         return (
             f"=====酷我=====\n"
-            f"账号{count}个，可用次数{total_auth}\n"
+            f"账号{count}个，可用次数{total_display}\n"
             "[1] 提交账号\n"
             "[2] 删除账号\n"
             "[3] 查询授权次数明细\n"
@@ -322,10 +345,18 @@ class KuwoManagerPlugin(Star):
             else:
                 msg = "📋 您的账号授权次数明细：\n"
                 total = 0
+                has_unlimited = False
                 for entry in my_env_entries:
-                    msg += f"手机号：{entry['phone']} ｜ 授权次数：{entry['auth_count']}\n"
-                    total += entry['auth_count']
-                msg += f"合计可用次数：{total}"
+                    auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
+                    msg += f"手机号：{entry['phone']} ｜ 授权次数：{auth_display}\n"
+                    if entry["auth_count"] is not None:
+                        total += entry["auth_count"]
+                    else:
+                        has_unlimited = True
+                if has_unlimited:
+                    msg += f"合计：存在无限制账号，总可用次数不限"
+                else:
+                    msg += f"合计可用次数：{total}"
                 yield event.plain_result(msg)
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
@@ -383,9 +414,10 @@ class KuwoManagerPlugin(Star):
             my_acc.append({"phone": phone, "password": password})
             self._update_cache_user(user_id, my_acc)
             env_entries = await self._get_all_env_entries()
-            env_entries.append({"phone": phone, "password": password, "auth_count": 0})
+            # 新增账号默认无限制（auth_count = None）
+            env_entries.append({"phone": phone, "password": password, "auth_count": None})
             await self._save_all_env_entries(env_entries)
-            yield event.plain_result(f"✅ 账号 {phone} 已保存")
+            yield event.plain_result(f"✅ 账号 {phone} 已保存（默认无限制）")
 
         self._set_state(user_id, 'idle', admin_mode=False)
         menu = await self._get_menu_text(user_id)
@@ -442,7 +474,7 @@ class KuwoManagerPlugin(Star):
             "[3] 绑定账号（为QQ绑定手机号）\n"
             "[4] 解除绑定（从QQ移除绑定，保留环境变量）\n"
             "[5] 删除账号（从所有绑定和环境变量移除）\n"
-            "[6] 修改授权次数（增/减/设）\n"
+            "[6] 修改授权次数（设置具体值或无限制）\n"
             "[7] 提现审核（扣减授权次数）\n"
             "[8] 重置用户所有数据\n"
             "[q] 退出"
@@ -502,8 +534,42 @@ class KuwoManagerPlugin(Star):
         except:
             return
 
-        # 确认删除状态：忽略数字
+        # 确认删除状态：忽略数字（由非数字处理器处理 y/n）
         if current_state == 'admin_delete_wait_confirm':
+            return
+
+        # 修改授权次数新值输入：处理数字（设置具体值）
+        if current_state == 'admin_auth_wait_new_value':
+            phone = state_info.get('tmp_data', {}).get('phone')
+            if not phone:
+                yield event.plain_result("❌ 会话错误，请重新操作")
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+                return
+            if num < 0:
+                yield event.plain_result("❌ 授权次数不能为负数")
+                return
+            env_entries = await self._get_all_env_entries()
+            found = False
+            for entry in env_entries:
+                if entry["phone"] == phone:
+                    entry["auth_count"] = num
+                    found = True
+                    break
+            if not found:
+                yield event.plain_result(f"❌ 手机号 {phone} 不存在于环境变量中")
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+                return
+            if await self._save_all_env_entries(env_entries):
+                yield event.plain_result(f"✅ 手机号 {phone} 授权次数已设置为 {num}")
+            else:
+                yield event.plain_result("❌ 保存失败")
+            self._set_state(user_id, 'idle', admin_mode=True)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
             return
 
         # 菜单选择（空闲状态）
@@ -577,9 +643,9 @@ class KuwoManagerPlugin(Star):
                 async for msg in self._admin_reset_select_handle(event):
                     yield msg
 
-    # ---------- 非数字通用处理器 ----------
+    # ---------- 非数字通用处理器（处理无限制输入和 y/n 确认） ----------
     @filter.regex(r'^[^0-9].*$')
-    async def handle_admin_final(self, event: AstrMessageEvent):
+    async def handle_admin_non_digit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
@@ -588,49 +654,68 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("⏰ 操作已超时，已退出交互。")
             self._set_state(user_id, 'idle', admin_mode=False)
             return
-        if state_info['state'] != 'admin_delete_wait_confirm':
+        if not state_info.get('admin_mode', False):
             return
 
-        current_text = self._get_text(event)
-        if current_text.lower() == 'y':
-            phone_to_del = state_info.get('tmp_data', {}).get('phone_to_del')
-            if not phone_to_del:
-                yield event.plain_result("❌ 会话错误，请重新操作")
+        current_state = state_info['state']
+        text = self._get_text(event).strip()
+
+        # 修改授权次数新值输入：处理“无限制”关键词
+        if current_state == 'admin_auth_wait_new_value':
+            if text in ['无限制', '无限', 'unlimited']:
+                phone = state_info.get('tmp_data', {}).get('phone')
+                if not phone:
+                    yield event.plain_result("❌ 会话错误，请重新操作")
+                    self._set_state(user_id, 'idle', admin_mode=True)
+                    menu = await self._get_admin_menu_text()
+                    yield event.plain_result(menu)
+                    return
+                env_entries = await self._get_all_env_entries()
+                found = False
+                for entry in env_entries:
+                    if entry["phone"] == phone:
+                        entry["auth_count"] = None
+                        found = True
+                        break
+                if not found:
+                    yield event.plain_result(f"❌ 手机号 {phone} 不存在于环境变量中")
+                    self._set_state(user_id, 'idle', admin_mode=True)
+                    menu = await self._get_admin_menu_text()
+                    yield event.plain_result(menu)
+                    return
+                if await self._save_all_env_entries(env_entries):
+                    yield event.plain_result(f"✅ 手机号 {phone} 已设为无限制")
+                else:
+                    yield event.plain_result("❌ 保存失败")
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
             else:
-                result = await self._admin_do_delete(phone_to_del)
-                yield event.plain_result(result)
-            self._set_state(user_id, 'idle', admin_mode=True)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
+                yield event.plain_result("❌ 输入无效，请输入数字或 '无限制'")
             return
-        if current_text.lower() == 'n':
-            yield event.plain_result("❌ 已取消删除操作")
-            self._set_state(user_id, 'idle', admin_mode=True)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
-            return
-        yield event.plain_result("❌ 已取消删除操作")
-        self._set_state(user_id, 'idle', admin_mode=True)
-        menu = await self._get_admin_menu_text()
-        yield event.plain_result(menu)
 
-    async def _admin_do_delete(self, phone: str) -> str:
-        deleted = False
-        for qq, data in self.cache.items():
-            accounts = data["accounts"]
-            for idx, acc in enumerate(accounts):
-                if acc["phone"] == phone:
-                    del accounts[idx]
-                    self._update_cache_user(qq, accounts)
-                    deleted = True
-                    break
-        env_entries = await self._get_all_env_entries()
-        env_entries = [e for e in env_entries if e["phone"] != phone]
-        await self._save_all_env_entries(env_entries)
-        if deleted:
-            return f"✅ 已删除手机号 {phone}（从所有绑定和环境变量中移除）"
-        else:
-            return f"✅ 已从环境变量删除手机号 {phone}（未发现绑定记录）"
+        # 删除确认状态：处理 y/n
+        if current_state == 'admin_delete_wait_confirm':
+            if text.lower() == 'y':
+                phone_to_del = state_info.get('tmp_data', {}).get('phone_to_del')
+                if not phone_to_del:
+                    yield event.plain_result("❌ 会话错误，请重新操作")
+                else:
+                    result = await self._admin_do_delete(phone_to_del)
+                    yield event.plain_result(result)
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+            elif text.lower() == 'n':
+                yield event.plain_result("❌ 已取消删除操作")
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+            else:
+                yield event.plain_result("❌ 已取消删除操作")
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
 
     # ---------- 管理员查看功能 ----------
     async def _admin_view_all_bindings(self) -> str:
@@ -666,9 +751,9 @@ class KuwoManagerPlugin(Star):
         msg = "📋 环境变量账号列表（含未绑定QQ）\n\n"
         for entry in env_entries:
             phone = entry["phone"]
-            auth = entry["auth_count"]
+            auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
             qq = phone_to_qq.get(phone, "未绑定")
-            msg += f"📱 {phone} ｜ 授权: {auth} ｜ 绑定QQ: {qq}\n"
+            msg += f"📱 {phone} ｜ 授权: {auth_display} ｜ 绑定QQ: {qq}\n"
         return msg
 
     # ---------- 绑定账号子操作 ----------
@@ -694,7 +779,8 @@ class KuwoManagerPlugin(Star):
 
         msg = "📋 未绑定的手机号列表：\n"
         for idx, entry in enumerate(unbound_phones, 1):
-            msg += f"{idx}. {entry['phone']} ｜ 授权次数: {entry['auth_count']}\n"
+            auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
+            msg += f"{idx}. {entry['phone']} ｜ 授权次数: {auth_display}\n"
         msg += "请选择要绑定的手机号序号："
         self._set_state(user_id, 'admin_bind_wait_phone_select', admin_mode=True, tmp_data={'unbound_phones': unbound_phones})
         yield event.plain_result(msg)
@@ -739,7 +825,6 @@ class KuwoManagerPlugin(Star):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout', False):
-            self._set_state(user_id, 'idle', admin_mode=False)
             return "⏰ 操作已超时，已退出交互。"
         if state_info['state'] != 'admin_bind_wait_qq_select':
             return "状态错误，请重新操作"
@@ -759,14 +844,12 @@ class KuwoManagerPlugin(Star):
                 return "❌ QQ号须为数字"
 
         result = await self._admin_do_bind(target_qq, selected_phone)
-        self._set_state(user_id, 'idle', admin_mode=True)
         return result
 
     async def _admin_bind_qq_input_handle(self, event) -> str:
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout', False):
-            self._set_state(user_id, 'idle', admin_mode=False)
             return "⏰ 操作已超时，已退出交互。"
         if state_info['state'] != 'admin_bind_wait_qq_input':
             return "状态错误，请重新操作"
@@ -778,7 +861,6 @@ class KuwoManagerPlugin(Star):
         if not selected_phone:
             return "❌ 会话错误，请重新操作"
         result = await self._admin_do_bind(target_qq, selected_phone)
-        self._set_state(user_id, 'idle', admin_mode=True)
         return result
 
     async def _admin_do_bind(self, target_qq: str, phone: str) -> str:
@@ -836,7 +918,8 @@ class KuwoManagerPlugin(Star):
 
         msg = "📋 已绑定的账号列表（解除绑定将保留环境变量）：\n"
         for idx, item in enumerate(bound_list, 1):
-            msg += f"{idx}. {item['phone']} ｜ 授权: {item['auth_count']} ｜ 绑定QQ: {item['qq']}\n"
+            auth_display = "无限制" if item["auth_count"] is None else str(item["auth_count"])
+            msg += f"{idx}. {item['phone']} ｜ 授权: {auth_display} ｜ 绑定QQ: {item['qq']}\n"
         msg += "请输入要解除绑定的账号序号："
         self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, tmp_data={'bound_list': bound_list})
         yield event.plain_result(msg)
@@ -893,7 +976,7 @@ class KuwoManagerPlugin(Star):
         msg = "📋 所有环境变量账号：\n"
         for idx, entry in enumerate(env_entries, 1):
             phone = entry["phone"]
-            auth = entry["auth_count"]
+            auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
             bound_qq = "未绑定"
             for qq, data in self.cache.items():
                 for acc in data["accounts"]:
@@ -902,7 +985,7 @@ class KuwoManagerPlugin(Star):
                         break
                 if bound_qq != "未绑定":
                     break
-            msg += f"{idx}. {phone} ｜ 授权: {auth} ｜ 绑定QQ: {bound_qq}\n"
+            msg += f"{idx}. {phone} ｜ 授权: {auth_display} ｜ 绑定QQ: {bound_qq}\n"
         msg += "请输入要删除的账号序号："
         self._set_state(user_id, 'admin_delete_wait_select', admin_mode=True, tmp_data={'env_entries': env_entries})
         yield event.plain_result(msg)
@@ -932,7 +1015,25 @@ class KuwoManagerPlugin(Star):
         self._set_state(user_id, 'admin_delete_wait_confirm', admin_mode=True, tmp_data={'phone_to_del': phone_to_del})
         yield event.plain_result(f"⚠️ 确认删除该账号（{phone_to_del}）吗？回复 y 确认，n 取消，数字忽略。")
 
-    # ---------- 授权次数修改子操作 ----------
+    async def _admin_do_delete(self, phone: str) -> str:
+        deleted = False
+        for qq, data in self.cache.items():
+            accounts = data["accounts"]
+            for idx, acc in enumerate(accounts):
+                if acc["phone"] == phone:
+                    del accounts[idx]
+                    self._update_cache_user(qq, accounts)
+                    deleted = True
+                    break
+        env_entries = await self._get_all_env_entries()
+        env_entries = [e for e in env_entries if e["phone"] != phone]
+        await self._save_all_env_entries(env_entries)
+        if deleted:
+            return f"✅ 已删除手机号 {phone}（从所有绑定和环境变量中移除）"
+        else:
+            return f"✅ 已从环境变量删除手机号 {phone}（未发现绑定记录）"
+
+    # ---------- 修改授权次数子操作 ----------
     async def _admin_auth_select(self, event):
         user_id = self._get_user_id(event)
         env_entries = await self._get_all_env_entries()
@@ -943,7 +1044,8 @@ class KuwoManagerPlugin(Star):
             return
         msg = "📋 所有环境变量账号（当前授权次数）：\n"
         for idx, entry in enumerate(env_entries, 1):
-            msg += f"{idx}. {entry['phone']} ｜ 授权: {entry['auth_count']}\n"
+            auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
+            msg += f"{idx}. {entry['phone']} ｜ 授权: {auth_display}\n"
         msg += "请输入要修改授权次数的账号序号："
         self._set_state(user_id, 'admin_auth_wait_select', admin_mode=True, tmp_data={'env_entries': env_entries})
         yield event.plain_result(msg)
@@ -970,57 +1072,9 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone = env_entries[idx-1]["phone"]
-        self._set_state(user_id, 'admin_auth_wait_delta', admin_mode=True, tmp_data={'phone': phone})
-        yield event.plain_result(f"已选择账号 {phone}，请输入要修改的差值（正数增加，负数减少）：")
-
-    @filter.regex(r'^-?\d+$')
-    async def handle_admin_auth_delta(self, event: AstrMessageEvent):
-        user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
-            return
-        state_info = self._get_state_info(user_id)
-        if state_info.get('timeout', False):
-            yield event.plain_result("⏰ 操作已超时，已退出交互。")
-            self._set_state(user_id, 'idle', admin_mode=False)
-            return
-        if state_info['state'] != 'admin_auth_wait_delta':
-            return
-        current_text = self._get_text(event)
-        if state_info.get('trigger_msg') == current_text:
-            return
-        try:
-            delta = int(current_text)
-        except:
-            yield event.plain_result("❌ 请输入有效的整数")
-            return
-        phone = state_info.get('tmp_data', {}).get('phone')
-        if not phone:
-            yield event.plain_result("❌ 会话错误，请重新操作")
-            self._set_state(user_id, 'idle', admin_mode=True)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
-            return
-        result = await self._admin_do_auth(phone, delta)
-        yield event.plain_result(result)
-        self._set_state(user_id, 'idle', admin_mode=True)
-        menu = await self._get_admin_menu_text()
-        yield event.plain_result(menu)
-
-    async def _admin_do_auth(self, phone: str, delta: int) -> str:
-        env_entries = await self._get_all_env_entries()
-        entry_found = None
-        for entry in env_entries:
-            if entry["phone"] == phone:
-                entry_found = entry
-                break
-        if not entry_found:
-            return f"❌ 手机号 {phone} 不存在于环境变量中"
-        new_count = entry_found["auth_count"] + delta
-        if new_count < 0:
-            return f"❌ 授权次数不能为负数，当前 {entry_found['auth_count']}，变化 {delta}"
-        entry_found["auth_count"] = new_count
-        await self._save_all_env_entries(env_entries)
-        return f"✅ 手机号 {phone} 授权次数已更新为 {new_count}（变动 {delta}）"
+        # 进入等待新值状态
+        self._set_state(user_id, 'admin_auth_wait_new_value', admin_mode=True, tmp_data={'phone': phone})
+        yield event.plain_result(f"已选择账号 {phone}，请输入新的授权次数（数字）或输入 '无限制'：")
 
     # ---------- 提现审核子操作 ----------
     async def _admin_withdraw_select(self, event):
@@ -1033,7 +1087,8 @@ class KuwoManagerPlugin(Star):
             return
         msg = "📋 所有环境变量账号（当前授权次数）：\n"
         for idx, entry in enumerate(env_entries, 1):
-            msg += f"{idx}. {entry['phone']} ｜ 授权: {entry['auth_count']}\n"
+            auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
+            msg += f"{idx}. {entry['phone']} ｜ 授权: {auth_display}\n"
         msg += "请输入要提现扣减的账号序号："
         self._set_state(user_id, 'admin_withdraw_wait_select', admin_mode=True, tmp_data={'env_entries': env_entries})
         yield event.plain_result(msg)
@@ -1060,6 +1115,16 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
             return
         phone = env_entries[idx-1]["phone"]
+        # 检查是否无限制
+        for entry in env_entries:
+            if entry["phone"] == phone:
+                if entry["auth_count"] is None:
+                    yield event.plain_result(f"❌ 账号 {phone} 为无限制，无法提现扣减")
+                    self._set_state(user_id, 'idle', admin_mode=True)
+                    menu = await self._get_admin_menu_text()
+                    yield event.plain_result(menu)
+                    return
+                break
         self._set_state(user_id, 'admin_withdraw_wait_amount', admin_mode=True, tmp_data={'phone': phone})
         yield event.plain_result(f"已选择账号 {phone}，请输入要提现扣减的数量（正整数）：")
 
@@ -1108,6 +1173,8 @@ class KuwoManagerPlugin(Star):
                 break
         if not entry_found:
             return f"❌ 手机号 {phone} 不存在于环境变量中"
+        if entry_found["auth_count"] is None:
+            return f"❌ 账号 {phone} 为无限制，无法提现"
         if entry_found["auth_count"] < amount:
             return f"❌ 授权次数不足！当前 {entry_found['auth_count']}，需扣减 {amount}"
         entry_found["auth_count"] -= amount
