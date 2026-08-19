@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 修复 session_id 构造"""
+    """酷我账号管理 - 修复 session_id 格式"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（session修复版）已加载")
+        logger.info("✅ 酷我插件（session格式修复）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -254,26 +254,21 @@ class KuwoManagerPlugin(Star):
         return "unknown"
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """手动构造正确的 session_id，格式：aiocqhttp:user_id[:group_id]"""
-        # 1. 尝试从 event 直接获取，若已包含冒号则直接使用
-        if hasattr(event, 'session_id'):
-            sid = event.session_id
-            if sid and ':' in sid:
+        """获取符合框架要求的 session_id，私聊使用 aiocqhttp:user_id:user_id"""
+        # 优先使用框架提供的方法
+        if hasattr(event, 'get_session_id'):
+            sid = event.get_session_id()
+            if sid and len(sid.split(':')) >= 2:
                 return sid
-        if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'session_id'):
-            sid = event.message_obj.session_id
-            if sid and ':' in sid:
-                return sid
-
-        # 2. 手动构造
+        # 手动构造
         user_id = self._get_user_id(event)
         # 检查是否为群聊
         if hasattr(event, 'group_id'):
             group_id = event.group_id
             if group_id:
                 return f"aiocqhttp:{user_id}:{group_id}"
-        # 私聊
-        return f"aiocqhttp:{user_id}"
+        # 私聊，第三部分也用 user_id
+        return f"aiocqhttp:{user_id}:{user_id}"
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
