@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 超时提醒最终修复版"""
+    """酷我账号管理 - 超时提醒最终修复版（直连）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（超时提醒最终修复版）已加载")
+        logger.info("✅ 酷我插件（超时提醒直连版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -253,24 +253,12 @@ class KuwoManagerPlugin(Star):
             return event.get_session_id()
         return "unknown"
 
-    # ----- 修复：正确获取 session_id，并转为三段式 -----
+    # ----- 关键修复：直接构造 session_id -----
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取有效的会话 ID，若为纯数字则自动构造三段式"""
-        sid = None
-        if hasattr(event, 'get_session_id'):
-            sid = event.get_session_id()
-        if sid and isinstance(sid, str) and sid:
-            # 如果 sid 是纯数字，构造三段式
-            if sid.isdigit():
-                # 尝试从 event 获取平台/adapter，否则默认 aiocqhttp
-                platform = getattr(event, 'platform', None) or getattr(event, 'adapter', None) or 'aiocqhttp'
-                sid = f"{platform}:private:{sid}"
-            return sid
-        # 最终回退：构造默认格式
+        """直接构造适用于 OneBot 的私聊 session_id"""
         user_id = self._get_user_id(event)
-        if user_id.isdigit():
-            return f"aiocqhttp:private:{user_id}"
-        return user_id
+        # 对于私聊，使用 friend 类型（OneBot 标准）
+        return f"aiocqhttp:friend:{user_id}"
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
@@ -329,10 +317,10 @@ class KuwoManagerPlugin(Star):
     async def _timeout_callback(self, user_id: str):
         info = self._get_state_info(user_id)
         if info['in_menu'] or info['state'] != 'idle':
+            # 直接使用构造的 session_id
             sid = info.get('session_id')
             sent = False
 
-            # 1. 优先尝试存储的 session_id（已是三段式）
             if sid:
                 try:
                     await self.context.send_message(sid, "⏰ 操作已超时，已退出交互。")
@@ -341,35 +329,24 @@ class KuwoManagerPlugin(Star):
                 except Exception as e:
                     logger.warning(f"使用存储的 session_id {sid} 发送失败: {e}")
 
-            # 2. 若失败，尝试多种常见前缀
+            # 若失败，尝试另一种常见格式
             if not sent:
-                # 如果 sid 是纯数字（意外情况），构造三段式
-                if sid and sid.isdigit():
-                    base = sid
-                else:
-                    base = user_id
-                platforms = ['aiocqhttp', 'onebot', 'qq', 'go-cqhttp', 'default']
-                session_types = ['private', 'friend', 'user']
-                for platform in platforms:
-                    for stype in session_types:
-                        fmt = f"{platform}:{stype}:{base}"
-                        try:
-                            await self.context.send_message(fmt, "⏰ 操作已超时，已退出交互。")
-                            logger.info(f"✅ 已向会话 {fmt} 发送超时提醒")
-                            sent = True
-                            break
-                        except Exception as e:
-                            logger.debug(f"尝试格式 {fmt} 失败: {e}")
-                    if sent:
-                        break
-                # 最后尝试直接传 QQ 号
-                if not sent:
-                    try:
-                        await self.context.send_message(base, "⏰ 操作已超时，已退出交互。")
-                        logger.info(f"✅ 已向会话 {base} 发送超时提醒")
-                        sent = True
-                    except Exception as e:
-                        logger.debug(f"尝试纯数字 {base} 失败: {e}")
+                alt_sid = f"aiocqhttp:user:{user_id}"
+                try:
+                    await self.context.send_message(alt_sid, "⏰ 操作已超时，已退出交互。")
+                    logger.info(f"✅ 已向会话 {alt_sid} 发送超时提醒")
+                    sent = True
+                except Exception as e:
+                    logger.warning(f"尝试格式 {alt_sid} 失败: {e}")
+
+            # 最后尝试直接使用 user_id（某些框架支持）
+            if not sent:
+                try:
+                    await self.context.send_message(user_id, "⏰ 操作已超时，已退出交互。")
+                    logger.info(f"✅ 已向会话 {user_id} 发送超时提醒")
+                    sent = True
+                except Exception as e:
+                    logger.warning(f"尝试纯数字 {user_id} 失败: {e}")
 
             if not sent:
                 logger.error(f"❌ 所有 session_id 格式均失败，无法发送超时提醒 (user_id={user_id})")
