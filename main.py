@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 完整版（q取消+超时提醒）"""
+    """酷我账号管理 - 修复 session_id 格式（private/group）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（完整版）已加载")
+        logger.info("✅ 酷我插件（session格式修复）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -254,32 +254,13 @@ class KuwoManagerPlugin(Star):
         return "unknown"
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取符合框架要求的 session_id（私聊: aiocqhttp:user:private, 群聊: aiocqhttp:user:group）"""
-        # 1. 优先使用框架提供的方法
-        if hasattr(event, 'get_session_id'):
-            sid = event.get_session_id()
-            if sid:
-                if ':' in sid:
-                    parts = sid.split(':')
-                    if len(parts) == 3 and parts[0] == 'aiocqhttp':
-                        if hasattr(event, 'group_id') and event.group_id:
-                            return f"{parts[0]}:{parts[1]}:group"
-                        else:
-                            return f"{parts[0]}:{parts[1]}:private"
-                    else:
-                        return sid
-                else:
-                    user_id = sid
-                    if hasattr(event, 'group_id') and event.group_id:
-                        return f"aiocqhttp:{user_id}:group"
-                    else:
-                        return f"aiocqhttp:{user_id}:private"
-        # 2. 手动构造
+        """获取符合 aiocqhttp 要求的 session_id（格式：aiocqhttp:private/group:user_id）"""
         user_id = self._get_user_id(event)
+        # 判断群聊还是私聊
         if hasattr(event, 'group_id') and event.group_id:
-            return f"aiocqhttp:{user_id}:group"
+            return f"aiocqhttp:group:{user_id}"
         else:
-            return f"aiocqhttp:{user_id}:private"
+            return f"aiocqhttp:private:{user_id}"
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
@@ -419,7 +400,6 @@ class KuwoManagerPlugin(Star):
         admin_mode = state_info.get('admin_mode', False)
         in_menu = state_info.get('in_menu', False)
 
-        # 如果已经在菜单状态，执行退出菜单
         if current_state == 'menu_idle' and in_menu:
             yield event.plain_result("👋 已退出菜单")
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
@@ -432,7 +412,6 @@ class KuwoManagerPlugin(Star):
             self._cancel_timeout(user_id)
             return
 
-        # 如果处于子操作状态（非菜单状态），取消操作返回菜单
         if in_menu and current_state not in ['idle', 'menu_idle', 'admin_menu_idle']:
             if admin_mode:
                 yield event.plain_result("👋 已取消操作，返回管理面板")
