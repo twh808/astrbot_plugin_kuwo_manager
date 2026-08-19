@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 主动超时提醒（修复版）"""
+    """酷我账号管理 - 修复超时主动提醒"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（主动超时版）已加载")
+        logger.info("✅ 酷我插件（超时修复版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -253,6 +253,18 @@ class KuwoManagerPlugin(Star):
             return event.get_session_id()
         return "unknown"
 
+    def _get_session_id(self, event: AstrMessageEvent) -> str:
+        """获取正确的 session_id"""
+        if hasattr(event, 'get_session_id'):
+            return event.get_session_id()
+        if hasattr(event, 'session_id'):
+            return event.session_id
+        # 尝试从 message_obj 构造
+        if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'session_id'):
+            return event.message_obj.session_id
+        # 如果都没有，返回 user_id 的占位符
+        return f"default:{self._get_user_id(event)}"
+
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
             return event.get_plain_text().strip()
@@ -278,12 +290,13 @@ class KuwoManagerPlugin(Star):
                 'tmp_data': {},
                 'trigger_msg': None,
                 'in_menu': False,
-                'timeout_triggered': False
+                'timeout_triggered': False,
+                'session_id': None
             }
         info = self.state_info[user_id]
         return info
 
-    def _set_state(self, user_id: str, state: str, admin_mode: bool = False, tmp_data: dict = None, trigger_msg: str = None, in_menu: bool = False):
+    def _set_state(self, user_id: str, state: str, admin_mode: bool = False, tmp_data: dict = None, trigger_msg: str = None, in_menu: bool = False, session_id: str = None):
         self.state_info[user_id] = {
             'state': state,
             'last_active': time.time(),
@@ -291,7 +304,8 @@ class KuwoManagerPlugin(Star):
             'tmp_data': tmp_data or {},
             'trigger_msg': trigger_msg,
             'in_menu': in_menu,
-            'timeout_triggered': False
+            'timeout_triggered': False,
+            'session_id': session_id or self.state_info.get(user_id, {}).get('session_id')
         }
 
     def _reset_admin_state(self, user_id: str):
@@ -305,23 +319,22 @@ class KuwoManagerPlugin(Star):
 
     # ---------- 超时任务管理 ----------
     async def _timeout_callback(self, user_id: str):
-        """超时回调：主动发送超时通知并重置状态"""
         info = self._get_state_info(user_id)
         if info['in_menu'] or info['state'] != 'idle':
             try:
-                # 主动发送消息
-                await self.context.send_message(user_id, "⏰ 操作已超时，已退出交互。")
-                logger.info(f"已向用户 {user_id} 发送超时提醒")
+                session_id = info.get('session_id')
+                if session_id:
+                    await self.context.send_message(session_id, "⏰ 操作已超时，已退出交互。")
+                    logger.info(f"已向会话 {session_id} 发送超时提醒")
+                else:
+                    logger.warning(f"无法获取 session_id，无法发送超时提醒")
             except Exception as e:
                 logger.error(f"发送超时消息失败: {e}")
-            # 重置状态
             self._set_state(user_id, 'idle', admin_mode=False, tmp_data={}, in_menu=False)
-            # 清除任务
             if user_id in self.timeout_tasks:
                 del self.timeout_tasks[user_id]
 
     def _schedule_timeout(self, user_id: str):
-        """安排或重置超时任务"""
         if user_id in self.timeout_tasks:
             self.timeout_tasks[user_id].cancel()
             del self.timeout_tasks[user_id]
@@ -363,6 +376,7 @@ class KuwoManagerPlugin(Star):
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
+        session_id = self._get_session_id(event)
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout_triggered', False):
             yield event.plain_result("⏰ 操作已超时，已退出交互。")
@@ -374,7 +388,7 @@ class KuwoManagerPlugin(Star):
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
             self._cancel_timeout(user_id)
         self._reset_admin_state(user_id)
-        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True)
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
@@ -468,7 +482,16 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'waiting_code_input' or not state_info.get('in_menu', False):
             return
 
-        code = self._get_text(event)
+        text = self._get_text(event)
+        if text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回菜单")
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
+            return
+
+        code = text
         if not code:
             yield event.plain_result("❌ 验证码不能为空")
             return
@@ -509,6 +532,13 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
+        if current_text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回菜单")
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
+            return
         try:
             idx = int(current_text)
         except:
@@ -538,6 +568,14 @@ class KuwoManagerPlugin(Star):
             return
 
         text = self._get_text(event)
+        if text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回菜单")
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
+            return
+
         phone, password = text.split('#', 1)
         phone = phone.strip()
         password = password.strip()
@@ -594,6 +632,13 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
+            return
+        if current_text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回菜单")
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
             return
         try:
             idx = int(current_text)
@@ -660,7 +705,8 @@ class KuwoManagerPlugin(Star):
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
             self._cancel_timeout(user_id)
         self._reset_admin_state(user_id)
-        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+        session_id = self._get_session_id(event)
+        self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, session_id=session_id)
         self._schedule_timeout(user_id)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
@@ -790,6 +836,7 @@ class KuwoManagerPlugin(Star):
             else:
                 yield event.plain_result("❌ 无效选项，请输入 1-8 或 q")
         else:
+            # 子状态
             if current_state == 'admin_bind_wait_phone_select':
                 async for msg in self._admin_bind_phone_select_handle(event):
                     yield msg
@@ -840,6 +887,17 @@ class KuwoManagerPlugin(Star):
 
         current_state = state_info['state']
         text = self._get_text(event).strip()
+
+        if text.lower() == 'q':
+            if current_state != 'admin_menu_idle' and current_state != 'idle':
+                yield event.plain_result("👋 已取消操作，返回管理面板")
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+                self._schedule_timeout(user_id)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+                return
+            else:
+                return
 
         if current_state == 'admin_auth_wait_new_value':
             if text in ['无限制', '无限', 'unlimited']:
@@ -997,6 +1055,13 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
+        if current_text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回管理面板")
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
         try:
             idx = int(current_text)
         except:
@@ -1031,6 +1096,10 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'admin_bind_wait_qq_select':
             return "状态错误，请重新操作"
         current_text = self._get_text(event)
+        if current_text.lower() == 'q':
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+            self._schedule_timeout(user_id)
+            return "👋 已取消操作，返回管理面板"
         tmp = state_info.get('tmp_data', {})
         selected_phone = tmp.get('selected_phone')
         qq_list = tmp.get('qq_list', [])
@@ -1060,6 +1129,10 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'admin_bind_wait_qq_input':
             return "状态错误，请重新操作"
         current_text = self._get_text(event)
+        if current_text.lower() == 'q':
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+            self._schedule_timeout(user_id)
+            return "👋 已取消操作，返回管理面板"
         if not current_text.isdigit():
             return "❌ QQ号须为数字"
         target_qq = current_text
@@ -1159,6 +1232,13 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
+        if current_text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回管理面板")
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
         try:
             idx = int(current_text)
         except:
@@ -1240,6 +1320,13 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
+        if current_text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回管理面板")
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
         try:
             idx = int(current_text)
         except:
@@ -1314,6 +1401,13 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
+        if current_text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回管理面板")
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
         try:
             idx = int(current_text)
         except:
@@ -1370,6 +1464,13 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
+        if current_text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回管理面板")
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
         try:
             idx = int(current_text)
         except:
@@ -1409,6 +1510,13 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
+            return
+        if current_text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回管理面板")
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
             return
         try:
             amount = int(current_text)
@@ -1491,6 +1599,13 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
+            return
+        if current_text.lower() == 'q':
+            yield event.plain_result("👋 已取消操作，返回管理面板")
+            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+            self._schedule_timeout(user_id)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
             return
         try:
             idx = int(current_text)
