@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终稳定版（命令改为酷我管理）"""
+    """酷我账号管理 - 最终稳定版（含超时提示，命令：酷我 / 酷我管理）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（命令改为酷我管理）已加载")
+        logger.info("✅ 酷我插件（超时提示版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -271,8 +271,14 @@ class KuwoManagerPlugin(Star):
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
-        info = self._get_state_info(user_id)
-        if info.get('admin_mode', False):
+        state_info = self._get_state_info(user_id)
+        # 超时检测
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        # 如果处于管理员模式，先退出
+        if state_info.get('admin_mode', False):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
         self._reset_admin_state(user_id)
@@ -284,6 +290,11 @@ class KuwoManagerPlugin(Star):
     async def handle_menu_choice(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
+        # 超时检测
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info.get('admin_mode', False):
             return
         if state_info['state'] != 'idle':
@@ -331,6 +342,11 @@ class KuwoManagerPlugin(Star):
     async def handle_phone_submit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
+        # 超时检测
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'waiting_phone':
             return
 
@@ -380,6 +396,11 @@ class KuwoManagerPlugin(Star):
     async def handle_delete_index(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
+        # 超时检测
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'waiting_delete':
             return
         current_text = self._get_text(event)
@@ -433,8 +454,13 @@ class KuwoManagerPlugin(Star):
         if user_id not in self.admin_qqs:
             yield event.plain_result("❌ 你没有权限执行此操作")
             return
-        info = self._get_state_info(user_id)
-        if info['state'] != 'idle' and not info.get('admin_mode', False):
+        state_info = self._get_state_info(user_id)
+        # 超时检测
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'idle' and not state_info.get('admin_mode', False):
             yield event.plain_result("👋 已退出普通用户菜单")
             self._set_state(user_id, 'idle', admin_mode=False)
         self._reset_admin_state(user_id)
@@ -448,6 +474,10 @@ class KuwoManagerPlugin(Star):
         if user_id not in self.admin_qqs:
             return
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info.get('admin_mode', False):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
@@ -459,6 +489,10 @@ class KuwoManagerPlugin(Star):
         if user_id not in self.admin_qqs:
             return
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if not state_info.get('admin_mode', False):
             return
 
@@ -628,6 +662,10 @@ class KuwoManagerPlugin(Star):
         if user_id not in self.admin_qqs:
             return
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'admin_bind_wait_qq_select':
             return
         current_text = self._get_text(event)
@@ -659,6 +697,10 @@ class KuwoManagerPlugin(Star):
         if user_id not in self.admin_qqs:
             return
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'admin_bind_wait_qq_input':
             return
         current_text = self._get_text(event)
@@ -730,6 +772,10 @@ class KuwoManagerPlugin(Star):
     async def _admin_delete_select_handle(self, event):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'admin_delete_wait_select':
             return
         current_text = self._get_text(event)
@@ -750,11 +796,14 @@ class KuwoManagerPlugin(Star):
     # ---------- 最终确认/取消处理器 ----------
     @filter.regex(r'^.*$')
     async def handle_admin_final(self, event: AstrMessageEvent):
-        """处理确认状态下的消息：y确认，n取消，数字忽略，其他取消"""
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'admin_delete_wait_confirm':
             return
 
@@ -828,6 +877,10 @@ class KuwoManagerPlugin(Star):
     async def _admin_auth_select_handle(self, event):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'admin_auth_wait_select':
             return
         current_text = self._get_text(event)
@@ -850,6 +903,10 @@ class KuwoManagerPlugin(Star):
         if user_id not in self.admin_qqs:
             return
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'admin_auth_wait_delta':
             return
         current_text = self._get_text(event)
@@ -906,6 +963,10 @@ class KuwoManagerPlugin(Star):
     async def _admin_withdraw_select_handle(self, event):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'admin_withdraw_wait_select':
             return
         current_text = self._get_text(event)
@@ -928,6 +989,10 @@ class KuwoManagerPlugin(Star):
         if user_id not in self.admin_qqs:
             return
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'admin_withdraw_wait_amount':
             return
         current_text = self._get_text(event)
@@ -987,6 +1052,10 @@ class KuwoManagerPlugin(Star):
     async def _admin_reset_select_handle(self, event):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
         if state_info['state'] != 'admin_reset_wait_select':
             return
         current_text = self._get_text(event)
