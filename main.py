@@ -3,12 +3,12 @@ import os
 import time
 import re
 import aiohttp
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 数字与非数字完全隔离"""
+    """酷我账号管理 - 最终稳定版（修复异步生成器 return 错误）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（数字隔离版）已加载")
+        logger.info("✅ 酷我插件（最终稳定版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -476,7 +476,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
 
-    # ---------- 数字专用处理器（确认状态下返回 MessageEventResult 阻止后续匹配） ----------
+    # ---------- 数字专用处理器 ----------
     @filter.regex(r'^\d+$')
     async def handle_admin_digit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -487,7 +487,6 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("⏰ 操作已超时，已退出交互。")
             self._set_state(user_id, 'idle', admin_mode=False)
             return
-
         if not state_info.get('admin_mode', False):
             return
 
@@ -498,9 +497,9 @@ class KuwoManagerPlugin(Star):
         except:
             return
 
-        # 在确认状态下，数字只用于忽略，并返回结果阻止后续处理器
+        # 在确认状态下，数字只用于忽略，并提前结束生成器（不返回任何值）
         if current_state == 'admin_delete_wait_confirm':
-            return MessageEventResult()  # 阻止后续匹配
+            return
 
         # 菜单选择（空闲状态）
         if current_state == 'idle':
@@ -554,10 +553,9 @@ class KuwoManagerPlugin(Star):
                 async for msg in self._admin_reset_select_handle(event):
                     yield msg
 
-    # ---------- 非数字通用处理器（只匹配非数字字符） ----------
+    # ---------- 非数字通用处理器 ----------
     @filter.regex(r'^[^0-9].*$')
     async def handle_admin_final(self, event: AstrMessageEvent):
-        """处理确认状态下的非数字消息：y确认，n取消，其他取消"""
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
