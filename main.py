@@ -324,35 +324,42 @@ class KuwoManagerPlugin(Star):
         if info['in_menu'] or info['state'] != 'idle':
             sid = info.get('session_id')
             sent = False
+
+            # 1. 优先使用存储的 session_id
             if sid:
                 try:
                     await self.context.send_message(sid, "⏰ 操作已超时，已退出交互。")
-                    logger.info(f"已向会话 {sid} 发送超时提醒")
+                    logger.info(f"✅ 已向会话 {sid} 发送超时提醒")
                     sent = True
                 except Exception as e:
-                    logger.debug(f"使用存储的 session_id {sid} 发送失败: {e}")
+                    logger.warning(f"使用存储的 session_id {sid} 发送失败: {e}")
 
+            # 2. 若失败，尝试多种常见格式（覆盖不同适配器）
             if not sent:
-                # 回退构造常见格式
                 formats = [
-                    f"aiocqhttp:friend:{user_id}",
                     f"aiocqhttp:private:{user_id}",
+                    f"aiocqhttp:friend:{user_id}",
                     f"aiocqhttp:user:{user_id}",
-                    f"aiocqhttp:Friend:{user_id}",
-                    f"aiocqhttp:Private:{user_id}",
+                    f"onebot:private:{user_id}",
+                    f"onebot:friend:{user_id}",
+                    f"onebot:user:{user_id}",
+                    f"private:{user_id}",
+                    f"friend:{user_id}",
+                    user_id,  # 直接传 QQ 号（部分框架支持）
                 ]
-                for sid in formats:
+                for fmt in formats:
                     try:
-                        await self.context.send_message(sid, "⏰ 操作已超时，已退出交互。")
-                        logger.info(f"已向会话 {sid} 发送超时提醒")
+                        await self.context.send_message(fmt, "⏰ 操作已超时，已退出交互。")
+                        logger.info(f"✅ 已向会话 {fmt} 发送超时提醒")
                         sent = True
                         break
                     except Exception as e:
-                        logger.debug(f"尝试 session_id {sid} 失败: {e}")
+                        logger.debug(f"尝试格式 {fmt} 失败: {e}")
 
             if not sent:
-                logger.error(f"所有 session_id 格式均失败，无法发送超时提醒")
+                logger.error(f"❌ 所有 session_id 格式均失败，无法发送超时提醒 (user_id={user_id})")
 
+            # 重置状态并清理任务
             self._set_state(user_id, 'idle', admin_mode=False, tmp_data={}, in_menu=False)
             if user_id in self.timeout_tasks:
                 del self.timeout_tasks[user_id]
