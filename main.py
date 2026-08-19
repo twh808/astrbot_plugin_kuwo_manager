@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 支持提交验证码（修复重复提交）"""
+    """酷我账号管理 - 支持提交验证码（修复捕获顺序）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -33,7 +33,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（验证码修复）已加载")
+        logger.info("✅ 酷我插件（验证码捕获顺序修复）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -411,6 +411,41 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("👋 已退出菜单")
             self._set_state(user_id, 'idle', admin_mode=False)
 
+    # ---------- 提交验证码：输入验证码（提前定义，优先捕获） ----------
+    @filter.regex(r'^.+$')
+    async def handle_code_input(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'waiting_code_input':
+            return
+
+        code = self._get_text(event)
+        if not code:
+            yield event.plain_result("❌ 验证码不能为空")
+            return
+        phone = state_info.get('tmp_data', {}).get('phone')
+        if not phone:
+            yield event.plain_result("❌ 会话错误，请重新操作")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
+            return
+
+        # 立即重置状态，防止重复处理
+        self._set_state(user_id, 'idle', admin_mode=False)
+
+        if await self._update_code_env(phone, code):
+            yield event.plain_result(f"✅ 验证码已提交：手机号 {phone} -> {code}")
+        else:
+            yield event.plain_result("❌ 提交验证码失败，请稍后重试")
+
+        menu = await self._get_menu_text(user_id)
+        yield event.plain_result(menu)
+
     # ---------- 提交验证码：选择手机号 ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
@@ -438,41 +473,6 @@ class KuwoManagerPlugin(Star):
         phone = my_acc[idx-1]["phone"]
         self._set_state(user_id, 'waiting_code_input', admin_mode=False, tmp_data={'phone': phone})
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码：")
-
-    # ---------- 提交验证码：输入验证码（修复重复提交） ----------
-    @filter.regex(r'^.+$')
-    async def handle_code_input(self, event: AstrMessageEvent):
-        user_id = self._get_user_id(event)
-        state_info = self._get_state_info(user_id)
-        if state_info.get('timeout', False):
-            yield event.plain_result("⏰ 操作已超时，已退出交互。")
-            self._set_state(user_id, 'idle', admin_mode=False)
-            return
-        if state_info['state'] != 'waiting_code_input':
-            return
-
-        code = self._get_text(event)
-        if not code:
-            yield event.plain_result("❌ 验证码不能为空")
-            return
-        phone = state_info.get('tmp_data', {}).get('phone')
-        if not phone:
-            yield event.plain_result("❌ 会话错误，请重新操作")
-            self._set_state(user_id, 'idle', admin_mode=False)
-            menu = await self._get_menu_text(user_id)
-            yield event.plain_result(menu)
-            return
-
-        # 立即重置状态，防止同一消息被重复处理
-        self._set_state(user_id, 'idle', admin_mode=False)
-
-        if await self._update_code_env(phone, code):
-            yield event.plain_result(f"✅ 验证码已提交：手机号 {phone} -> {code}")
-        else:
-            yield event.plain_result("❌ 提交验证码失败，请稍后重试")
-
-        menu = await self._get_menu_text(user_id)
-        yield event.plain_result(menu)
 
     # ---------- 提交账号（普通用户） ----------
     @filter.regex(r'^\d{11}#.+$')
@@ -571,7 +571,7 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 管理员交互（完整功能） ----------
+    # ---------- 管理员交互 ----------
     async def _get_admin_menu_text(self) -> str:
         return (
             "=====管理面板=====\n"
