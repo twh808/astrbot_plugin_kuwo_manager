@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 全面修复多步骤触发消息重复处理"""
+    """酷我账号管理 - 最终修复版（兼容框架参数传递）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（完整修复版）已加载")
+        logger.info("✅ 酷我插件（最终修复版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -273,7 +273,7 @@ class KuwoManagerPlugin(Star):
         )
 
     @filter.command("酷我")
-    async def kuwo_menu(self, event: AstrMessageEvent):
+    async def kuwo_menu(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout', False):
@@ -289,7 +289,7 @@ class KuwoManagerPlugin(Star):
         yield event.plain_result(menu)
 
     @filter.regex(r'^[1-3rRqQ]$')
-    async def handle_menu_choice(self, event: AstrMessageEvent):
+    async def handle_menu_choice(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout', False):
@@ -340,7 +340,7 @@ class KuwoManagerPlugin(Star):
 
     # ---------- 提交账号（普通用户） ----------
     @filter.regex(r'^\d{11}#.+$')
-    async def handle_phone_submit(self, event: AstrMessageEvent):
+    async def handle_phone_submit(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout', False):
@@ -393,7 +393,7 @@ class KuwoManagerPlugin(Star):
 
     # ---------- 删除账号（普通用户） ----------
     @filter.regex(r'^\d+$')
-    async def handle_delete_index(self, event: AstrMessageEvent):
+    async def handle_delete_index(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout', False):
@@ -448,7 +448,7 @@ class KuwoManagerPlugin(Star):
         )
 
     @filter.command("酷我管理")
-    async def admin_menu(self, event: AstrMessageEvent):
+    async def admin_menu(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             yield event.plain_result("❌ 你没有权限执行此操作")
@@ -467,7 +467,7 @@ class KuwoManagerPlugin(Star):
         yield event.plain_result(menu)
 
     @filter.regex(r'^[qQ]$')
-    async def handle_admin_quit(self, event: AstrMessageEvent):
+    async def handle_admin_quit(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
@@ -480,9 +480,9 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
 
-    # ---------- 数字专用处理器（确认状态下忽略） ----------
+    # ---------- 数字专用处理器 ----------
     @filter.regex(r'^\d+$')
-    async def handle_admin_digit(self, event: AstrMessageEvent):
+    async def handle_admin_digit(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
@@ -541,7 +541,6 @@ class KuwoManagerPlugin(Star):
                 yield event.plain_result("❌ 无效选项，请输入 1-7 或 q")
         else:
             # 子状态（非确认状态）：转发给对应的子处理函数
-            # 但子处理函数内部会检查 trigger_msg 忽略触发消息
             if current_state == 'admin_bind_wait_phone_select':
                 async for msg in self._admin_bind_phone_select_handle(event):
                     yield msg
@@ -558,9 +557,9 @@ class KuwoManagerPlugin(Star):
                 async for msg in self._admin_reset_select_handle(event):
                     yield msg
 
-    # ---------- 非数字通用处理器（处理确认状态） ----------
+    # ---------- 非数字通用处理器 ----------
     @filter.regex(r'^[^0-9].*$')
-    async def handle_admin_final(self, event: AstrMessageEvent):
+    async def handle_admin_final(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
@@ -690,7 +689,6 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'admin_bind_wait_phone_select':
             return
         current_text = self._get_text(event)
-        # 检查是否触发消息（防止重复处理）
         if state_info.get('trigger_msg') == current_text:
             return
         try:
@@ -718,7 +716,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("当前无绑定记录，请输入要绑定的QQ号：")
 
     @filter.regex(r'^\d+$')
-    async def handle_admin_bind_qq_select(self, event: AstrMessageEvent):
+    async def handle_admin_bind_qq_select(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
@@ -755,7 +753,7 @@ class KuwoManagerPlugin(Star):
         yield event.plain_result(menu)
 
     @filter.regex(r'^\d+$')
-    async def handle_admin_bind_qq_input(self, event: AstrMessageEvent):
+    async def handle_admin_bind_qq_input(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
@@ -901,7 +899,7 @@ class KuwoManagerPlugin(Star):
         yield event.plain_result(f"已选择账号 {phone}，请输入要修改的差值（正数增加，负数减少）：")
 
     @filter.regex(r'^-?\d+$')
-    async def handle_admin_auth_delta(self, event: AstrMessageEvent):
+    async def handle_admin_auth_delta(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
@@ -991,7 +989,7 @@ class KuwoManagerPlugin(Star):
         yield event.plain_result(f"已选择账号 {phone}，请输入要提现扣减的数量（正整数）：")
 
     @filter.regex(r'^\d+$')
-    async def handle_admin_withdraw_amount(self, event: AstrMessageEvent):
+    async def handle_admin_withdraw_amount(self, event: AstrMessageEvent, *args):
         user_id = self._get_user_id(event)
         if user_id not in self.admin_qqs:
             return
