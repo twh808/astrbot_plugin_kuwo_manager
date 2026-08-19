@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终稳定版（参数签名修复）"""
+    """酷我账号管理 - 最终稳定版（修复绑定流程数字消息未被消费问题）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（参数修复版）已加载")
+        logger.info("✅ 酷我插件（最终版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -480,7 +480,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
 
-    # ---------- 数字专用处理器 ----------
+    # ---------- 数字专用处理器（唯一数字入口） ----------
     @filter.regex(r'^\d+$')
     async def handle_admin_digit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -544,6 +544,12 @@ class KuwoManagerPlugin(Star):
             if current_state == 'admin_bind_wait_phone_select':
                 async for msg in self._admin_bind_phone_select_handle(event):
                     yield msg
+            elif current_state == 'admin_bind_wait_qq_select':
+                async for msg in self._admin_bind_qq_select_handle(event):
+                    yield msg
+            elif current_state == 'admin_bind_wait_qq_input':
+                async for msg in self._admin_bind_qq_input_handle(event):
+                    yield msg
             elif current_state == 'admin_delete_wait_select':
                 async for msg in self._admin_delete_select_handle(event):
                     yield msg
@@ -557,7 +563,7 @@ class KuwoManagerPlugin(Star):
                 async for msg in self._admin_reset_select_handle(event):
                     yield msg
 
-    # ---------- 非数字通用处理器 ----------
+    # ---------- 非数字通用处理器（处理确认状态） ----------
     @filter.regex(r'^[^0-9].*$')
     async def handle_admin_final(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -715,11 +721,9 @@ class KuwoManagerPlugin(Star):
             self._set_state(user_id, 'admin_bind_wait_qq_input', admin_mode=True, tmp_data={'selected_phone': selected_phone}, trigger_msg=current_text)
             yield event.plain_result("当前无绑定记录，请输入要绑定的QQ号：")
 
-    @filter.regex(r'^\d+$')
-    async def handle_admin_bind_qq_select(self, event: AstrMessageEvent):
+    async def _admin_bind_qq_select_handle(self, event):
+        """处理绑定流程中QQ序号的输入"""
         user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
-            return
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout', False):
             yield event.plain_result("⏰ 操作已超时，已退出交互。")
@@ -752,11 +756,9 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
 
-    @filter.regex(r'^\d+$')
-    async def handle_admin_bind_qq_input(self, event: AstrMessageEvent):
+    async def _admin_bind_qq_input_handle(self, event):
+        """处理绑定流程中直接输入新QQ号"""
         user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
-            return
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout', False):
             yield event.plain_result("⏰ 操作已超时，已退出交互。")
