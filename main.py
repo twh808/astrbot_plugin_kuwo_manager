@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终稳定版"""
+    """酷我账号管理 - 修复 session_id 构造"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（最终版）已加载")
+        logger.info("✅ 酷我插件（session修复版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -254,31 +254,26 @@ class KuwoManagerPlugin(Star):
         return "unknown"
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取框架认可的 session_id"""
-        # 优先使用框架提供的方法
-        if hasattr(event, 'get_session_id'):
-            sid = event.get_session_id()
-            if sid:
-                logger.debug(f"获取到 session_id: {sid}")
-                return sid
-        # 尝试 session_id 属性
+        """手动构造正确的 session_id，格式：aiocqhttp:user_id[:group_id]"""
+        # 1. 尝试从 event 直接获取，若已包含冒号则直接使用
         if hasattr(event, 'session_id'):
             sid = event.session_id
-            if sid:
-                logger.debug(f"从 session_id 属性获取: {sid}")
+            if sid and ':' in sid:
                 return sid
-        # 最后构造一个默认的
+        if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'session_id'):
+            sid = event.message_obj.session_id
+            if sid and ':' in sid:
+                return sid
+
+        # 2. 手动构造
         user_id = self._get_user_id(event)
-        # 尝试构造带平台前缀的格式
+        # 检查是否为群聊
         if hasattr(event, 'group_id'):
             group_id = event.group_id
             if group_id:
-                sid = f"aiocqhttp:{user_id}:{group_id}"
-                logger.debug(f"构造群聊 session_id: {sid}")
-                return sid
-        sid = f"aiocqhttp:{user_id}"
-        logger.debug(f"构造私聊 session_id: {sid}")
-        return sid
+                return f"aiocqhttp:{user_id}:{group_id}"
+        # 私聊
+        return f"aiocqhttp:{user_id}"
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
@@ -339,7 +334,6 @@ class KuwoManagerPlugin(Star):
             try:
                 session_id = info.get('session_id')
                 if session_id:
-                    # 打印 session_id 以便调试
                     logger.info(f"准备向 session_id: {session_id} 发送超时提醒")
                     await self.context.send_message(session_id, "⏰ 操作已超时，已退出交互。")
                     logger.info(f"已向会话 {session_id} 发送超时提醒")
@@ -419,7 +413,6 @@ class KuwoManagerPlugin(Star):
         admin_mode = state_info.get('admin_mode', False)
         in_menu = state_info.get('in_menu', False)
 
-        # 如果已经在菜单状态，执行退出菜单
         if current_state == 'menu_idle' and in_menu:
             yield event.plain_result("👋 已退出菜单")
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
@@ -432,7 +425,6 @@ class KuwoManagerPlugin(Star):
             self._cancel_timeout(user_id)
             return
 
-        # 如果处于子操作状态（非菜单状态），取消操作返回菜单
         if in_menu and current_state not in ['idle', 'menu_idle', 'admin_menu_idle']:
             if admin_mode:
                 yield event.plain_result("👋 已取消操作，返回管理面板")
@@ -447,9 +439,6 @@ class KuwoManagerPlugin(Star):
                 menu = await self._get_menu_text(user_id)
                 yield event.plain_result(menu)
             return
-
-        # 其他情况忽略
-        return
 
     # ---------- 普通用户菜单 ----------
     @filter.command("酷我")
