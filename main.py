@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 超时主动发送（使用 unified_msg_origin）"""
+    """酷我账号管理 - 超时主动发送 + 环境变量缓存优化"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,12 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（超时主动发送 UMO 版）已加载")
+        # ---------- 环境变量缓存 ----------
+        self._env_cache = None          # 缓存的环境变量条目列表
+        self._env_cache_time = 0        # 缓存时间戳
+        self._env_cache_ttl = 3         # 缓存有效期（秒），避免短时间重复请求
+
+        logger.info("✅ 酷我插件（优化缓存版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -122,8 +127,14 @@ class KuwoManagerPlugin(Star):
             result = await self._call_api(f"envs/{env_id}", method="PUT", data=payload)
         return result.get("code") in [0, None, ""] and not result.get("error")
 
-    # ---------- 环境变量读写（kwtx，支持无限制） ----------
+    # ---------- 环境变量读写（kwtx，支持无限制） + 缓存 ----------
     async def _get_all_env_entries(self) -> list:
+        """获取环境变量条目，带有 3 秒缓存，避免重复请求"""
+        now = time.time()
+        if self._env_cache is not None and (now - self._env_cache_time) < self._env_cache_ttl:
+            logger.debug("使用缓存的环境变量数据")
+            return self._env_cache
+
         value = ""
         env_id = await self._get_env_id_by_name(self.env_name)
         if env_id:
@@ -133,27 +144,33 @@ class KuwoManagerPlugin(Star):
                     value = env.get("value", "")
                     break
         if not value:
-            return []
-        lines = value.split('\n')
-        entries = []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split('#')
-            if len(parts) >= 2:
-                phone = parts[0].strip()
-                password = parts[1].strip()
-                auth_count = None
-                if len(parts) >= 3 and parts[2].strip():
-                    try:
-                        auth_count = int(parts[2].strip())
-                    except:
-                        auth_count = None
-                entries.append({"phone": phone, "password": password, "auth_count": auth_count})
+            entries = []
+        else:
+            lines = value.split('\n')
+            entries = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split('#')
+                if len(parts) >= 2:
+                    phone = parts[0].strip()
+                    password = parts[1].strip()
+                    auth_count = None
+                    if len(parts) >= 3 and parts[2].strip():
+                        try:
+                            auth_count = int(parts[2].strip())
+                        except:
+                            auth_count = None
+                    entries.append({"phone": phone, "password": password, "auth_count": auth_count})
+        # 更新缓存
+        self._env_cache = entries
+        self._env_cache_time = now
+        logger.debug(f"更新环境变量缓存，共 {len(entries)} 条")
         return entries
 
     async def _save_all_env_entries(self, entries: list) -> bool:
+        """保存环境变量并清空缓存"""
         if not entries:
             new_value = ""
         else:
@@ -164,7 +181,12 @@ class KuwoManagerPlugin(Star):
                 else:
                     lines.append(f"{e['phone']}#{e['password']}#{e['auth_count']}")
             new_value = '\n'.join(lines)
-        return await self._update_env_value(self.env_name, new_value)
+        result = await self._update_env_value(self.env_name, new_value)
+        # 保存成功后，清空缓存
+        if result:
+            self._env_cache = None
+            self._env_cache_time = 0
+        return result
 
     # ---------- 验证码环境变量读写 ----------
     async def _get_code_env_value(self) -> str:
@@ -279,7 +301,7 @@ class KuwoManagerPlugin(Star):
                 'trigger_msg': None,
                 'in_menu': False,
                 'timeout_triggered': False,
-                'umo': None,  # unified_msg_origin 用于主动发送
+                'umo': None,
             }
         return self.state_info[user_id]
 
@@ -306,7 +328,6 @@ class KuwoManagerPlugin(Star):
             info['trigger_msg'] = None
             info['in_menu'] = False
             info['timeout_triggered'] = False
-            # 保留 umo 以备可能的重用
 
     # ---------- 超时任务管理 ----------
     async def _timeout_callback(self, user_id: str):
@@ -326,7 +347,6 @@ class KuwoManagerPlugin(Star):
             if not sent:
                 logger.error(f"❌ 无法发送超时提醒 (user_id={user_id})")
 
-            # 重置状态并清理任务
             self._set_state(user_id, 'idle', admin_mode=False, tmp_data={}, in_menu=False)
             if user_id in self.timeout_tasks:
                 del self.timeout_tasks[user_id]
@@ -383,17 +403,6 @@ class KuwoManagerPlugin(Star):
             "[8] 重置用户所有数据\n"
             "[q] 退出"
         )
-
-    # ---------- 超时标记检查内联函数 ----------
-    def _check_timeout(self, event: AstrMessageEvent) -> bool:
-        """检查当前用户是否超时，如果是则发送提醒并清理状态，返回 True 表示已处理"""
-        user_id = self._get_user_id(event)
-        info = self._get_state_info(user_id)
-        if info.get('timeout_triggered', False):
-            # 通过 event.plain_result 发送提醒（这是同步方法，但可以配合 yield）
-            # 我们在调用方使用 yield
-            return True
-        return False
 
     # ---------- 全局 q 处理器 ----------
     @filter.regex(r'^[qQ]$')
