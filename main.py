@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 修复超时主动提醒"""
+    """酷我账号管理 - q取消全覆盖版"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（超时修复版）已加载")
+        logger.info("✅ 酷我插件（q取消全覆盖）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -254,15 +254,12 @@ class KuwoManagerPlugin(Star):
         return "unknown"
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取正确的 session_id"""
         if hasattr(event, 'get_session_id'):
             return event.get_session_id()
         if hasattr(event, 'session_id'):
             return event.session_id
-        # 尝试从 message_obj 构造
         if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'session_id'):
             return event.message_obj.session_id
-        # 如果都没有，返回 user_id 的占位符
         return f"default:{self._get_user_id(event)}"
 
     def _get_text(self, event: AstrMessageEvent) -> str:
@@ -353,7 +350,7 @@ class KuwoManagerPlugin(Star):
             self.timeout_tasks[user_id].cancel()
             del self.timeout_tasks[user_id]
 
-    # ---------- 普通用户菜单 ----------
+    # ---------- 菜单 ----------
     async def _get_menu_text(self, user_id: str) -> str:
         my_acc = await self._get_my_accounts(user_id)
         count = len(my_acc)
@@ -372,6 +369,67 @@ class KuwoManagerPlugin(Star):
             "[r] 重置我的所有数据\n"
             "[q] 退出"
         )
+
+    async def _get_admin_menu_text(self) -> str:
+        return (
+            "=====管理面板=====\n"
+            "[1] 查看所有绑定关系\n"
+            "[2] 查看所有环境变量账号\n"
+            "[3] 绑定账号（为QQ绑定手机号）\n"
+            "[4] 解除绑定（从QQ移除绑定，保留环境变量）\n"
+            "[5] 删除账号（从所有绑定和环境变量移除）\n"
+            "[6] 修改授权次数（设置具体值或无限制）\n"
+            "[7] 提现审核（扣减授权次数）\n"
+            "[8] 重置用户所有数据\n"
+            "[q] 退出"
+        )
+
+    # ---------- 全局 q 处理器 ----------
+    @filter.regex(r'^[qQ]$')
+    async def handle_global_q(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout_triggered', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
+            self._cancel_timeout(user_id)
+            return
+
+        current_state = state_info['state']
+        admin_mode = state_info.get('admin_mode', False)
+        in_menu = state_info.get('in_menu', False)
+
+        # 如果已经在菜单状态，执行退出菜单
+        if current_state == 'menu_idle' and in_menu:
+            yield event.plain_result("👋 已退出菜单")
+            self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
+            self._cancel_timeout(user_id)
+            return
+
+        if current_state == 'admin_menu_idle' and in_menu and admin_mode:
+            yield event.plain_result("👋 已退出管理面板")
+            self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
+            self._cancel_timeout(user_id)
+            return
+
+        # 如果处于子操作状态（非菜单状态），取消操作返回菜单
+        if in_menu and current_state not in ['idle', 'menu_idle', 'admin_menu_idle']:
+            if admin_mode:
+                yield event.plain_result("👋 已取消操作，返回管理面板")
+                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
+                self._schedule_timeout(user_id)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+            else:
+                yield event.plain_result("👋 已取消操作，返回菜单")
+                self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True)
+                self._schedule_timeout(user_id)
+                menu = await self._get_menu_text(user_id)
+                yield event.plain_result(menu)
+            return
+
+        # 其他情况忽略（如空闲状态）
+        return
 
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
@@ -393,7 +451,7 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    @filter.regex(r'^[1-4rRqQ]$')
+    @filter.regex(r'^[1-4rR]$')
     async def handle_menu_choice(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
@@ -464,10 +522,6 @@ class KuwoManagerPlugin(Star):
             self._schedule_timeout(user_id)
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
-        elif text == 'q':
-            yield event.plain_result("👋 已退出菜单")
-            self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
-            self._cancel_timeout(user_id)
 
     # ---------- 提交验证码：输入验证码 ----------
     @filter.regex(r'^.+$')
@@ -483,14 +537,6 @@ class KuwoManagerPlugin(Star):
             return
 
         text = self._get_text(event)
-        if text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回菜单")
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_menu_text(user_id)
-            yield event.plain_result(menu)
-            return
-
         code = text
         if not code:
             yield event.plain_result("❌ 验证码不能为空")
@@ -532,13 +578,6 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
-        if current_text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回菜单")
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_menu_text(user_id)
-            yield event.plain_result(menu)
-            return
         try:
             idx = int(current_text)
         except:
@@ -568,14 +607,6 @@ class KuwoManagerPlugin(Star):
             return
 
         text = self._get_text(event)
-        if text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回菜单")
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_menu_text(user_id)
-            yield event.plain_result(menu)
-            return
-
         phone, password = text.split('#', 1)
         phone = phone.strip()
         password = password.strip()
@@ -633,13 +664,6 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
-        if current_text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回菜单")
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_menu_text(user_id)
-            yield event.plain_result(menu)
-            return
         try:
             idx = int(current_text)
         except:
@@ -674,20 +698,6 @@ class KuwoManagerPlugin(Star):
         yield event.plain_result(menu)
 
     # ---------- 管理员交互 ----------
-    async def _get_admin_menu_text(self) -> str:
-        return (
-            "=====管理面板=====\n"
-            "[1] 查看所有绑定关系\n"
-            "[2] 查看所有环境变量账号\n"
-            "[3] 绑定账号（为QQ绑定手机号）\n"
-            "[4] 解除绑定（从QQ移除绑定，保留环境变量）\n"
-            "[5] 删除账号（从所有绑定和环境变量移除）\n"
-            "[6] 修改授权次数（设置具体值或无限制）\n"
-            "[7] 提现审核（扣减授权次数）\n"
-            "[8] 重置用户所有数据\n"
-            "[q] 退出"
-        )
-
     @filter.command("酷我管理")
     async def admin_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -710,22 +720,6 @@ class KuwoManagerPlugin(Star):
         self._schedule_timeout(user_id)
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
-
-    @filter.regex(r'^[qQ]$')
-    async def handle_admin_quit(self, event: AstrMessageEvent):
-        user_id = self._get_user_id(event)
-        if user_id not in self.admin_qqs:
-            return
-        state_info = self._get_state_info(user_id)
-        if state_info.get('timeout_triggered', False):
-            yield event.plain_result("⏰ 操作已超时，已退出交互。")
-            self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
-            self._cancel_timeout(user_id)
-            return
-        if state_info.get('admin_mode', False) and state_info.get('in_menu', False):
-            yield event.plain_result("👋 已退出管理面板")
-            self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
-            self._cancel_timeout(user_id)
 
     # ---------- 数字专用处理器（管理员） ----------
     @filter.regex(r'^\d+$')
@@ -888,17 +882,6 @@ class KuwoManagerPlugin(Star):
         current_state = state_info['state']
         text = self._get_text(event).strip()
 
-        if text.lower() == 'q':
-            if current_state != 'admin_menu_idle' and current_state != 'idle':
-                yield event.plain_result("👋 已取消操作，返回管理面板")
-                self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
-                self._schedule_timeout(user_id)
-                menu = await self._get_admin_menu_text()
-                yield event.plain_result(menu)
-                return
-            else:
-                return
-
         if current_state == 'admin_auth_wait_new_value':
             if text in ['无限制', '无限', 'unlimited']:
                 phone = state_info.get('tmp_data', {}).get('phone')
@@ -1055,13 +1038,6 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
-        if current_text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回管理面板")
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
-            return
         try:
             idx = int(current_text)
         except:
@@ -1096,10 +1072,6 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'admin_bind_wait_qq_select':
             return "状态错误，请重新操作"
         current_text = self._get_text(event)
-        if current_text.lower() == 'q':
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
-            self._schedule_timeout(user_id)
-            return "👋 已取消操作，返回管理面板"
         tmp = state_info.get('tmp_data', {})
         selected_phone = tmp.get('selected_phone')
         qq_list = tmp.get('qq_list', [])
@@ -1129,10 +1101,6 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'admin_bind_wait_qq_input':
             return "状态错误，请重新操作"
         current_text = self._get_text(event)
-        if current_text.lower() == 'q':
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
-            self._schedule_timeout(user_id)
-            return "👋 已取消操作，返回管理面板"
         if not current_text.isdigit():
             return "❌ QQ号须为数字"
         target_qq = current_text
@@ -1232,13 +1200,6 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
-        if current_text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回管理面板")
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
-            return
         try:
             idx = int(current_text)
         except:
@@ -1320,13 +1281,6 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
-        if current_text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回管理面板")
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
-            return
         try:
             idx = int(current_text)
         except:
@@ -1401,13 +1355,6 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
-        if current_text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回管理面板")
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
-            return
         try:
             idx = int(current_text)
         except:
@@ -1464,13 +1411,6 @@ class KuwoManagerPlugin(Star):
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
             return
-        if current_text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回管理面板")
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
-            return
         try:
             idx = int(current_text)
         except:
@@ -1510,13 +1450,6 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
-            return
-        if current_text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回管理面板")
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
             return
         try:
             amount = int(current_text)
@@ -1599,13 +1532,6 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
-            return
-        if current_text.lower() == 'q':
-            yield event.plain_result("👋 已取消操作，返回管理面板")
-            self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True)
-            self._schedule_timeout(user_id)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
             return
         try:
             idx = int(current_text)
