@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 完整稳定版"""
+    """酷我账号管理 - 最终稳定版"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（完整版）已加载")
+        logger.info("✅ 酷我插件（最终版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -254,29 +254,31 @@ class KuwoManagerPlugin(Star):
         return "unknown"
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取正确的 session_id，支持群聊和私聊"""
-        # 尝试各种方式获取 session_id
+        """获取框架认可的 session_id"""
+        # 优先使用框架提供的方法
         if hasattr(event, 'get_session_id'):
             sid = event.get_session_id()
             if sid:
+                logger.debug(f"获取到 session_id: {sid}")
                 return sid
+        # 尝试 session_id 属性
         if hasattr(event, 'session_id'):
             sid = event.session_id
             if sid:
+                logger.debug(f"从 session_id 属性获取: {sid}")
                 return sid
-        if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'session_id'):
-            sid = event.message_obj.session_id
-            if sid:
-                return sid
-        # 构造 session_id
+        # 最后构造一个默认的
         user_id = self._get_user_id(event)
-        # 检查是否是群聊
+        # 尝试构造带平台前缀的格式
         if hasattr(event, 'group_id'):
             group_id = event.group_id
             if group_id:
-                return f"aiocqhttp:{user_id}:{group_id}"
-        # 私聊
-        return f"aiocqhttp:{user_id}"
+                sid = f"aiocqhttp:{user_id}:{group_id}"
+                logger.debug(f"构造群聊 session_id: {sid}")
+                return sid
+        sid = f"aiocqhttp:{user_id}"
+        logger.debug(f"构造私聊 session_id: {sid}")
+        return sid
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
@@ -337,6 +339,8 @@ class KuwoManagerPlugin(Star):
             try:
                 session_id = info.get('session_id')
                 if session_id:
+                    # 打印 session_id 以便调试
+                    logger.info(f"准备向 session_id: {session_id} 发送超时提醒")
                     await self.context.send_message(session_id, "⏰ 操作已超时，已退出交互。")
                     logger.info(f"已向会话 {session_id} 发送超时提醒")
                 else:
