@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终稳定版（修复绑定流程数字消息未被消费问题）"""
+    """酷我账号管理 - 最终修复绑定流程数字消费问题"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（最终版）已加载")
+        logger.info("✅ 酷我插件（最终修复版）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -480,7 +480,7 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False)
 
-    # ---------- 数字专用处理器（唯一数字入口） ----------
+    # ---------- 数字专用处理器（统一入口） ----------
     @filter.regex(r'^\d+$')
     async def handle_admin_digit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -501,7 +501,7 @@ class KuwoManagerPlugin(Star):
         except:
             return
 
-        # 在确认删除状态下，数字直接忽略
+        # 确认删除状态：忽略数字
         if current_state == 'admin_delete_wait_confirm':
             return
 
@@ -540,16 +540,22 @@ class KuwoManagerPlugin(Star):
             else:
                 yield event.plain_result("❌ 无效选项，请输入 1-7 或 q")
         else:
-            # 子状态（非确认状态）：转发给对应的子处理函数
+            # 子状态：调用对应的处理函数，它们返回字符串或生成器
             if current_state == 'admin_bind_wait_phone_select':
                 async for msg in self._admin_bind_phone_select_handle(event):
                     yield msg
             elif current_state == 'admin_bind_wait_qq_select':
-                async for msg in self._admin_bind_qq_select_handle(event):
-                    yield msg
+                result = await self._admin_bind_qq_select_handle(event)
+                yield event.plain_result(result)
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
             elif current_state == 'admin_bind_wait_qq_input':
-                async for msg in self._admin_bind_qq_input_handle(event):
-                    yield msg
+                result = await self._admin_bind_qq_input_handle(event)
+                yield event.plain_result(result)
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
             elif current_state == 'admin_delete_wait_select':
                 async for msg in self._admin_delete_select_handle(event):
                     yield msg
@@ -721,70 +727,55 @@ class KuwoManagerPlugin(Star):
             self._set_state(user_id, 'admin_bind_wait_qq_input', admin_mode=True, tmp_data={'selected_phone': selected_phone}, trigger_msg=current_text)
             yield event.plain_result("当前无绑定记录，请输入要绑定的QQ号：")
 
-    async def _admin_bind_qq_select_handle(self, event):
-        """处理绑定流程中QQ序号的输入"""
+    async def _admin_bind_qq_select_handle(self, event) -> str:
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout', False):
-            yield event.plain_result("⏰ 操作已超时，已退出交互。")
             self._set_state(user_id, 'idle', admin_mode=False)
-            return
+            return "⏰ 操作已超时，已退出交互。"
         if state_info['state'] != 'admin_bind_wait_qq_select':
-            return
+            return "状态错误，请重新操作"
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
-            return
+            return "请勿重复输入触发消息"
         tmp = state_info.get('tmp_data', {})
         selected_phone = tmp.get('selected_phone')
         qq_list = tmp.get('qq_list', [])
         try:
             idx = int(current_text)
             if idx < 1 or idx > len(qq_list):
-                yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(qq_list)} 之间的数字，或直接输入新QQ号")
-                return
+                return f"❌ 序号无效，请输入 1 到 {len(qq_list)} 之间的数字，或直接输入新QQ号"
             target_qq = qq_list[idx-1]
         except ValueError:
             if current_text.isdigit():
                 target_qq = current_text
             else:
-                yield event.plain_result("❌ QQ号须为数字")
-                return
+                return "❌ QQ号须为数字"
 
         result = await self._admin_do_bind(target_qq, selected_phone)
-        yield event.plain_result(result)
         self._set_state(user_id, 'idle', admin_mode=True)
-        menu = await self._get_admin_menu_text()
-        yield event.plain_result(menu)
+        return result
 
-    async def _admin_bind_qq_input_handle(self, event):
-        """处理绑定流程中直接输入新QQ号"""
+    async def _admin_bind_qq_input_handle(self, event) -> str:
         user_id = self._get_user_id(event)
         state_info = self._get_state_info(user_id)
         if state_info.get('timeout', False):
-            yield event.plain_result("⏰ 操作已超时，已退出交互。")
             self._set_state(user_id, 'idle', admin_mode=False)
-            return
+            return "⏰ 操作已超时，已退出交互。"
         if state_info['state'] != 'admin_bind_wait_qq_input':
-            return
+            return "状态错误，请重新操作"
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
-            return
+            return "请勿重复输入触发消息"
         if not current_text.isdigit():
-            yield event.plain_result("❌ QQ号须为数字")
-            return
+            return "❌ QQ号须为数字"
         target_qq = current_text
         selected_phone = state_info.get('tmp_data', {}).get('selected_phone')
         if not selected_phone:
-            yield event.plain_result("❌ 会话错误，请重新操作")
-            self._set_state(user_id, 'idle', admin_mode=True)
-            menu = await self._get_admin_menu_text()
-            yield event.plain_result(menu)
-            return
+            return "❌ 会话错误，请重新操作"
         result = await self._admin_do_bind(target_qq, selected_phone)
-        yield event.plain_result(result)
         self._set_state(user_id, 'idle', admin_mode=True)
-        menu = await self._get_admin_menu_text()
-        yield event.plain_result(menu)
+        return result
 
     async def _admin_do_bind(self, target_qq: str, phone: str) -> str:
         existing_owner = None
