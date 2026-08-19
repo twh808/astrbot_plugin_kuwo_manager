@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - q取消全覆盖版"""
+    """酷我账号管理 - 完整稳定版"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,7 +35,7 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        logger.info("✅ 酷我插件（q取消全覆盖）已加载")
+        logger.info("✅ 酷我插件（完整版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -254,13 +254,29 @@ class KuwoManagerPlugin(Star):
         return "unknown"
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
+        """获取正确的 session_id，支持群聊和私聊"""
+        # 尝试各种方式获取 session_id
         if hasattr(event, 'get_session_id'):
-            return event.get_session_id()
+            sid = event.get_session_id()
+            if sid:
+                return sid
         if hasattr(event, 'session_id'):
-            return event.session_id
+            sid = event.session_id
+            if sid:
+                return sid
         if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'session_id'):
-            return event.message_obj.session_id
-        return f"default:{self._get_user_id(event)}"
+            sid = event.message_obj.session_id
+            if sid:
+                return sid
+        # 构造 session_id
+        user_id = self._get_user_id(event)
+        # 检查是否是群聊
+        if hasattr(event, 'group_id'):
+            group_id = event.group_id
+            if group_id:
+                return f"aiocqhttp:{user_id}:{group_id}"
+        # 私聊
+        return f"aiocqhttp:{user_id}"
 
     def _get_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_plain_text'):
@@ -324,7 +340,7 @@ class KuwoManagerPlugin(Star):
                     await self.context.send_message(session_id, "⏰ 操作已超时，已退出交互。")
                     logger.info(f"已向会话 {session_id} 发送超时提醒")
                 else:
-                    logger.warning(f"无法获取 session_id，无法发送超时提醒")
+                    logger.warning(f"用户 {user_id} 无 session_id，无法发送超时提醒")
             except Exception as e:
                 logger.error(f"发送超时消息失败: {e}")
             self._set_state(user_id, 'idle', admin_mode=False, tmp_data={}, in_menu=False)
@@ -428,9 +444,10 @@ class KuwoManagerPlugin(Star):
                 yield event.plain_result(menu)
             return
 
-        # 其他情况忽略（如空闲状态）
+        # 其他情况忽略
         return
 
+    # ---------- 普通用户菜单 ----------
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
