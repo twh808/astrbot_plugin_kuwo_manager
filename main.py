@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 支持提交验证码到 CODE 环境变量"""
+    """酷我账号管理 - 支持提交验证码到 CODE 环境变量（修复触发消息）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -19,8 +19,8 @@ class KuwoManagerPlugin(Star):
         self.app_secret = config.get("app_secret", "").strip()
         self.token = None
         self.token_expiry = 0
-        self.env_name = "kwtx"          # 账号授权次数环境变量
-        self.code_env_name = "CODE"     # 验证码环境变量
+        self.env_name = "kwtx"
+        self.code_env_name = "CODE"
 
         admin_str = config.get("admin_qq", "").strip()
         self.admin_qqs = [qq.strip() for qq in admin_str.split(',') if qq.strip()]
@@ -33,7 +33,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（提交验证码）已加载")
+        logger.info("✅ 酷我插件（验证码修复）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -126,7 +126,6 @@ class KuwoManagerPlugin(Star):
 
     # ---------- 环境变量读写（kwtx，支持无限制） ----------
     async def _get_all_env_entries(self) -> list:
-        """返回条目列表，auth_count 可能为 int 或 None（无限制）"""
         value = ""
         env_id = await self._get_env_id_by_name(self.env_name)
         if env_id:
@@ -171,7 +170,6 @@ class KuwoManagerPlugin(Star):
 
     # ---------- 验证码环境变量读写 ----------
     async def _get_code_env_value(self) -> str:
-        """获取 CODE 环境变量的当前值"""
         value = ""
         env_id = await self._get_env_id_by_name(self.code_env_name)
         if env_id:
@@ -183,12 +181,9 @@ class KuwoManagerPlugin(Star):
         return value
 
     async def _update_code_env(self, phone: str, code: str) -> bool:
-        """更新 CODE 环境变量，若手机号已存在则覆盖，否则新增"""
         current = await self._get_code_env_value()
         lines = current.split('\n') if current else []
-        # 移除空行
         lines = [line.strip() for line in lines if line.strip()]
-        # 查找是否已有该手机号
         found = False
         new_lines = []
         for line in lines:
@@ -375,7 +370,7 @@ class KuwoManagerPlugin(Star):
                 lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
                 prompt = "您的账号：\n" + "\n".join(lines) + "\n请输入要删除的序号（如 1）："
                 yield event.plain_result(prompt)
-                self._set_state(user_id, 'waiting_delete', admin_mode=False)
+                self._set_state(user_id, 'waiting_delete', admin_mode=False, trigger_msg=text)
         elif text == '3':
             my_env_entries = await self._get_my_env_entries(user_id)
             if not my_env_entries:
@@ -406,7 +401,7 @@ class KuwoManagerPlugin(Star):
                 lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
                 prompt = "请选择要提交验证码的账号序号：\n" + "\n".join(lines) + "\n请输入序号："
                 yield event.plain_result(prompt)
-                self._set_state(user_id, 'waiting_code_phone', admin_mode=False)
+                self._set_state(user_id, 'waiting_code_phone', admin_mode=False, trigger_msg=text)
         elif text == 'r':
             await self._reset_user_data(user_id)
             yield event.plain_result("✅ 您的所有数据已重置")
@@ -429,6 +424,7 @@ class KuwoManagerPlugin(Star):
             return
         current_text = self._get_text(event)
         if state_info.get('trigger_msg') == current_text:
+            # 忽略触发消息（即刚输入的 "4"）
             return
         try:
             idx = int(current_text)
@@ -455,8 +451,6 @@ class KuwoManagerPlugin(Star):
             return
         if state_info['state'] != 'waiting_code_input':
             return
-        # 只处理非数字消息？验证码可能包含数字和字母，但为了不干扰数字选择，我们用正则匹配所有字符，但仅在状态为 waiting_code_input 时处理
-        # 但需注意，用户可能在输入验证码时输入数字，这些数字不会被其他处理器捕获，因为状态已改变。
         code = self._get_text(event)
         if not code:
             yield event.plain_result("❌ 验证码不能为空")
@@ -469,7 +463,6 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(menu)
             return
 
-        # 更新到 CODE 环境变量
         if await self._update_code_env(phone, code):
             yield event.plain_result(f"✅ 验证码已提交：手机号 {phone} -> {code}")
         else:
@@ -524,7 +517,6 @@ class KuwoManagerPlugin(Star):
             my_acc.append({"phone": phone, "password": password})
             self._update_cache_user(user_id, my_acc)
             env_entries = await self._get_all_env_entries()
-            # 新增账号默认无限制（auth_count = None）
             env_entries.append({"phone": phone, "password": password, "auth_count": None})
             await self._save_all_env_entries(env_entries)
             yield event.plain_result(f"✅ 账号 {phone} 已保存（默认无限制）")
@@ -545,6 +537,8 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'waiting_delete':
             return
         current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
+            return
         try:
             idx = int(current_text)
         except:
@@ -575,6 +569,757 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 管理员交互（仅保留菜单，其他功能与之前相同，但为完整需保留） ----------
-    # 由于管理员功能未变，以下省略详细代码（但实际提供时需包含全部）
-    # 此处仅为示意，最终提供完整代码
+    # ---------- 管理员交互 ----------
+    # 管理员代码与之前完全相同，为节省篇幅，请参见之前提供的完整版本
+    # 但为了确保完整性，这里包含所有功能
+    async def _get_admin_menu_text(self) -> str:
+        return (
+            "=====管理面板=====\n"
+            "[1] 查看所有绑定关系\n"
+            "[2] 查看所有环境变量账号\n"
+            "[3] 绑定账号（为QQ绑定手机号）\n"
+            "[4] 解除绑定（从QQ移除绑定，保留环境变量）\n"
+            "[5] 删除账号（从所有绑定和环境变量移除）\n"
+            "[6] 修改授权次数（设置具体值或无限制）\n"
+            "[7] 提现审核（扣减授权次数）\n"
+            "[8] 重置用户所有数据\n"
+            "[q] 退出"
+        )
+
+    @filter.command("酷我管理")
+    async def admin_menu(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        if user_id not in self.admin_qqs:
+            yield event.plain_result("❌ 你没有权限执行此操作")
+            return
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'idle' and not state_info.get('admin_mode', False):
+            yield event.plain_result("👋 已退出普通用户菜单")
+            self._set_state(user_id, 'idle', admin_mode=False)
+        self._reset_admin_state(user_id)
+        self._set_state(user_id, 'idle', admin_mode=True)
+        menu = await self._get_admin_menu_text()
+        yield event.plain_result(menu)
+
+    @filter.regex(r'^[qQ]$')
+    async def handle_admin_quit(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        if user_id not in self.admin_qqs:
+            return
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info.get('admin_mode', False):
+            yield event.plain_result("👋 已退出管理面板")
+            self._set_state(user_id, 'idle', admin_mode=False)
+
+    # ---------- 数字专用处理器 ----------
+    @filter.regex(r'^\d+$')
+    async def handle_admin_digit(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        if user_id not in self.admin_qqs:
+            return
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if not state_info.get('admin_mode', False):
+            return
+
+        current_state = state_info['state']
+        text = self._get_text(event)
+        try:
+            num = int(text)
+        except:
+            return
+
+        if current_state == 'admin_delete_wait_confirm':
+            return
+
+        if current_state == 'admin_auth_wait_new_value':
+            phone = state_info.get('tmp_data', {}).get('phone')
+            if not phone:
+                yield event.plain_result("❌ 会话错误，请重新操作")
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+                return
+            if num < 0:
+                yield event.plain_result("❌ 授权次数不能为负数")
+                return
+            env_entries = await self._get_all_env_entries()
+            found = False
+            for entry in env_entries:
+                if entry["phone"] == phone:
+                    entry["auth_count"] = num
+                    found = True
+                    break
+            if not found:
+                yield event.plain_result(f"❌ 手机号 {phone} 不存在于环境变量中")
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+                return
+            if await self._save_all_env_entries(env_entries):
+                yield event.plain_result(f"✅ 手机号 {phone} 授权次数已设置为 {num}")
+            else:
+                yield event.plain_result("❌ 保存失败")
+            self._set_state(user_id, 'idle', admin_mode=True)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+
+        if current_state == 'idle':
+            if num == 1:
+                result = await self._admin_view_all_bindings()
+                yield event.plain_result(result)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+            elif num == 2:
+                result = await self._admin_view_all_env_accounts()
+                yield event.plain_result(result)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+            elif num == 3:
+                self._set_state(user_id, 'admin_bind_wait_phone_select', admin_mode=True, tmp_data={})
+                async for msg in self._admin_bind_select_phone(event):
+                    yield msg
+            elif num == 4:
+                self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, tmp_data={})
+                async for msg in self._admin_unbind_select(event):
+                    yield msg
+            elif num == 5:
+                self._set_state(user_id, 'admin_delete_wait_select', admin_mode=True, tmp_data={})
+                async for msg in self._admin_delete_select(event):
+                    yield msg
+            elif num == 6:
+                self._set_state(user_id, 'admin_auth_wait_select', admin_mode=True, tmp_data={})
+                async for msg in self._admin_auth_select(event):
+                    yield msg
+            elif num == 7:
+                self._set_state(user_id, 'admin_withdraw_wait_select', admin_mode=True, tmp_data={})
+                async for msg in self._admin_withdraw_select(event):
+                    yield msg
+            elif num == 8:
+                self._set_state(user_id, 'admin_reset_wait_select', admin_mode=True, tmp_data={})
+                async for msg in self._admin_reset_select(event):
+                    yield msg
+            else:
+                yield event.plain_result("❌ 无效选项，请输入 1-8 或 q")
+        else:
+            if current_state == 'admin_bind_wait_phone_select':
+                async for msg in self._admin_bind_phone_select_handle(event):
+                    yield msg
+            elif current_state == 'admin_bind_wait_qq_select':
+                result = await self._admin_bind_qq_select_handle(event)
+                yield event.plain_result(result)
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+            elif current_state == 'admin_bind_wait_qq_input':
+                result = await self._admin_bind_qq_input_handle(event)
+                yield event.plain_result(result)
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+            elif current_state == 'admin_unbind_wait_select':
+                async for msg in self._admin_unbind_select_handle(event):
+                    yield msg
+            elif current_state == 'admin_delete_wait_select':
+                async for msg in self._admin_delete_select_handle(event):
+                    yield msg
+            elif current_state == 'admin_auth_wait_select':
+                async for msg in self._admin_auth_select_handle(event):
+                    yield msg
+            elif current_state == 'admin_withdraw_wait_select':
+                async for msg in self._admin_withdraw_select_handle(event):
+                    yield msg
+            elif current_state == 'admin_reset_wait_select':
+                async for msg in self._admin_reset_select_handle(event):
+                    yield msg
+
+    # ---------- 非数字通用处理器 ----------
+    @filter.regex(r'^[^0-9].*$')
+    async def handle_admin_non_digit(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        if user_id not in self.admin_qqs:
+            return
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if not state_info.get('admin_mode', False):
+            return
+
+        current_state = state_info['state']
+        text = self._get_text(event).strip()
+
+        if current_state == 'admin_auth_wait_new_value':
+            if text in ['无限制', '无限', 'unlimited']:
+                phone = state_info.get('tmp_data', {}).get('phone')
+                if not phone:
+                    yield event.plain_result("❌ 会话错误，请重新操作")
+                    self._set_state(user_id, 'idle', admin_mode=True)
+                    menu = await self._get_admin_menu_text()
+                    yield event.plain_result(menu)
+                    return
+                env_entries = await self._get_all_env_entries()
+                found = False
+                for entry in env_entries:
+                    if entry["phone"] == phone:
+                        entry["auth_count"] = None
+                        found = True
+                        break
+                if not found:
+                    yield event.plain_result(f"❌ 手机号 {phone} 不存在于环境变量中")
+                    self._set_state(user_id, 'idle', admin_mode=True)
+                    menu = await self._get_admin_menu_text()
+                    yield event.plain_result(menu)
+                    return
+                if await self._save_all_env_entries(env_entries):
+                    yield event.plain_result(f"✅ 手机号 {phone} 已设为无限制")
+                else:
+                    yield event.plain_result("❌ 保存失败")
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+            else:
+                yield event.plain_result("❌ 输入无效，请输入数字或 '无限制'")
+            return
+
+        if current_state == 'admin_delete_wait_confirm':
+            if text.lower() == 'y':
+                phone_to_del = state_info.get('tmp_data', {}).get('phone_to_del')
+                if not phone_to_del:
+                    yield event.plain_result("❌ 会话错误，请重新操作")
+                else:
+                    result = await self._admin_do_delete(phone_to_del)
+                    yield event.plain_result(result)
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+            elif text.lower() == 'n':
+                yield event.plain_result("❌ 已取消删除操作")
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+            else:
+                yield event.plain_result("❌ 已取消删除操作")
+                self._set_state(user_id, 'idle', admin_mode=True)
+                menu = await self._get_admin_menu_text()
+                yield event.plain_result(menu)
+
+    # ---------- 管理员查看功能 ----------
+    async def _admin_view_all_bindings(self) -> str:
+        if not self.cache:
+            return "📭 暂无任何用户绑定数据"
+        msg = "📋 所有绑定关系（手机号，密码已隐藏）\n\n"
+        total_users = 0
+        total_accounts = 0
+        for qq, data in self.cache.items():
+            accounts = data.get("accounts", [])
+            if not accounts:
+                continue
+            total_users += 1
+            total_accounts += len(accounts)
+            msg += f"👤 QQ: {qq}\n"
+            for acc in accounts:
+                msg += f"  📱 {acc['phone']}\n"
+            msg += "\n"
+        if total_users == 0:
+            return "📭 暂无任何用户绑定数据"
+        msg += f"统计：共 {total_users} 个用户，{total_accounts} 个绑定账号"
+        return msg
+
+    async def _admin_view_all_env_accounts(self) -> str:
+        env_entries = await self._get_all_env_entries()
+        if not env_entries:
+            return "📭 环境变量中暂无任何账号"
+        phone_to_qq = {}
+        for qq, data in self.cache.items():
+            for acc in data.get("accounts", []):
+                phone_to_qq[acc["phone"]] = qq
+
+        msg = "📋 环境变量账号列表（含未绑定QQ）\n\n"
+        for entry in env_entries:
+            phone = entry["phone"]
+            auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
+            qq = phone_to_qq.get(phone, "未绑定")
+            msg += f"📱 {phone} ｜ 授权: {auth_display} ｜ 绑定QQ: {qq}\n"
+        return msg
+
+    # ---------- 绑定账号子操作 ----------
+    async def _admin_bind_select_phone(self, event):
+        user_id = self._get_user_id(event)
+        env_entries = await self._get_all_env_entries()
+        if not env_entries:
+            yield event.plain_result("❌ 环境变量中暂无账号，请先让用户提交账号或手动添加")
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+
+        bound_phones = set()
+        for qq, data in self.cache.items():
+            for acc in data.get("accounts", []):
+                bound_phones.add(acc["phone"])
+        unbound_phones = [entry for entry in env_entries if entry["phone"] not in bound_phones]
+        if not unbound_phones:
+            yield event.plain_result("✅ 所有环境变量账号均已绑定，无需操作")
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+
+        msg = "📋 未绑定的手机号列表：\n"
+        for idx, entry in enumerate(unbound_phones, 1):
+            auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
+            msg += f"{idx}. {entry['phone']} ｜ 授权次数: {auth_display}\n"
+        msg += "请选择要绑定的手机号序号："
+        self._set_state(user_id, 'admin_bind_wait_phone_select', admin_mode=True, tmp_data={'unbound_phones': unbound_phones})
+        yield event.plain_result(msg)
+
+    async def _admin_bind_phone_select_handle(self, event):
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'admin_bind_wait_phone_select':
+            return
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
+            return
+        try:
+            idx = int(current_text)
+        except:
+            yield event.plain_result("❌ 请输入有效的数字")
+            return
+        unbound_phones = state_info.get('tmp_data', {}).get('unbound_phones', [])
+        if idx < 1 or idx > len(unbound_phones):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(unbound_phones)} 之间的数字")
+            return
+
+        selected_phone = unbound_phones[idx-1]["phone"]
+        qq_list = list(self.cache.keys())
+        if qq_list:
+            msg = "📋 可绑定的QQ列表：\n"
+            for i, qq in enumerate(qq_list, 1):
+                acc_count = len(self.cache[qq].get("accounts", []))
+                msg += f"{i}. {qq} ｜ 账号数: {acc_count}\n"
+            msg += f"请输入要绑定到该手机号的QQ序号（或直接输入新QQ号）："
+            self._set_state(user_id, 'admin_bind_wait_qq_select', admin_mode=True, tmp_data={'selected_phone': selected_phone, 'qq_list': qq_list})
+            yield event.plain_result(msg)
+        else:
+            self._set_state(user_id, 'admin_bind_wait_qq_input', admin_mode=True, tmp_data={'selected_phone': selected_phone})
+            yield event.plain_result("当前无绑定记录，请输入要绑定的QQ号：")
+
+    async def _admin_bind_qq_select_handle(self, event) -> str:
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            return "⏰ 操作已超时，已退出交互。"
+        if state_info['state'] != 'admin_bind_wait_qq_select':
+            return "状态错误，请重新操作"
+        current_text = self._get_text(event)
+        tmp = state_info.get('tmp_data', {})
+        selected_phone = tmp.get('selected_phone')
+        qq_list = tmp.get('qq_list', [])
+        try:
+            idx = int(current_text)
+            if idx < 1 or idx > len(qq_list):
+                return f"❌ 序号无效，请输入 1 到 {len(qq_list)} 之间的数字，或直接输入新QQ号"
+            target_qq = qq_list[idx-1]
+        except ValueError:
+            if current_text.isdigit():
+                target_qq = current_text
+            else:
+                return "❌ QQ号须为数字"
+
+        result = await self._admin_do_bind(target_qq, selected_phone)
+        return result
+
+    async def _admin_bind_qq_input_handle(self, event) -> str:
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            return "⏰ 操作已超时，已退出交互。"
+        if state_info['state'] != 'admin_bind_wait_qq_input':
+            return "状态错误，请重新操作"
+        current_text = self._get_text(event)
+        if not current_text.isdigit():
+            return "❌ QQ号须为数字"
+        target_qq = current_text
+        selected_phone = state_info.get('tmp_data', {}).get('selected_phone')
+        if not selected_phone:
+            return "❌ 会话错误，请重新操作"
+        result = await self._admin_do_bind(target_qq, selected_phone)
+        return result
+
+    async def _admin_do_bind(self, target_qq: str, phone: str) -> str:
+        existing_owner = None
+        for qq, data in self.cache.items():
+            for acc in data["accounts"]:
+                if acc["phone"] == phone:
+                    existing_owner = qq
+                    break
+            if existing_owner:
+                break
+        target_cache = self._get_cache_user(target_qq)
+        accounts = target_cache["accounts"]
+        for acc in accounts:
+            if acc["phone"] == phone:
+                return f"⚠️ 用户 {target_qq} 已绑定该手机号"
+        password = "admin_placeholder"
+        accounts.append({"phone": phone, "password": password})
+        self._update_cache_user(target_qq, accounts)
+        msg = f"✅ 已为用户 {target_qq} 绑定手机号 {phone}"
+        if existing_owner and existing_owner != target_qq:
+            msg += f"\n⚠️ 注意：该手机号原本属于用户 {existing_owner}，已被管理员强制迁移至 {target_qq}"
+        return msg
+
+    # ---------- 解除绑定子操作 ----------
+    async def _admin_unbind_select(self, event):
+        user_id = self._get_user_id(event)
+        env_entries = await self._get_all_env_entries()
+        if not env_entries:
+            yield event.plain_result("❌ 环境变量中暂无账号")
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+
+        phone_to_qq = {}
+        for qq, data in self.cache.items():
+            for acc in data.get("accounts", []):
+                phone_to_qq[acc["phone"]] = qq
+
+        bound_list = []
+        for entry in env_entries:
+            phone = entry["phone"]
+            if phone in phone_to_qq:
+                bound_list.append({
+                    "phone": phone,
+                    "auth_count": entry["auth_count"],
+                    "qq": phone_to_qq[phone]
+                })
+
+        if not bound_list:
+            yield event.plain_result("✅ 没有已绑定的账号需要解除")
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+
+        msg = "📋 已绑定的账号列表（解除绑定将保留环境变量）：\n"
+        for idx, item in enumerate(bound_list, 1):
+            auth_display = "无限制" if item["auth_count"] is None else str(item["auth_count"])
+            msg += f"{idx}. {item['phone']} ｜ 授权: {auth_display} ｜ 绑定QQ: {item['qq']}\n"
+        msg += "请输入要解除绑定的账号序号："
+        self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, tmp_data={'bound_list': bound_list})
+        yield event.plain_result(msg)
+
+    async def _admin_unbind_select_handle(self, event):
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'admin_unbind_wait_select':
+            return
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
+            return
+        try:
+            idx = int(current_text)
+        except:
+            yield event.plain_result("❌ 请输入有效的数字")
+            return
+        bound_list = state_info.get('tmp_data', {}).get('bound_list', [])
+        if idx < 1 or idx > len(bound_list):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(bound_list)} 之间的数字")
+            return
+        item = bound_list[idx-1]
+        phone = item["phone"]
+        qq = item["qq"]
+
+        cache_user = self._get_cache_user(qq)
+        accounts = cache_user["accounts"]
+        new_accounts = [acc for acc in accounts if acc["phone"] != phone]
+        if len(new_accounts) == len(accounts):
+            yield event.plain_result(f"❌ 手机号 {phone} 不在用户 {qq} 的绑定列表中")
+            self._set_state(user_id, 'idle', admin_mode=True)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+        self._update_cache_user(qq, new_accounts)
+        yield event.plain_result(f"✅ 已解除绑定：手机号 {phone} 从 QQ {qq} 移除（环境变量中的账号保留）")
+        self._set_state(user_id, 'idle', admin_mode=True)
+        menu = await self._get_admin_menu_text()
+        yield event.plain_result(menu)
+
+    # ---------- 删除账号子操作 ----------
+    async def _admin_delete_select(self, event):
+        user_id = self._get_user_id(event)
+        env_entries = await self._get_all_env_entries()
+        if not env_entries:
+            yield event.plain_result("❌ 环境变量中暂无账号")
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+        msg = "📋 所有环境变量账号：\n"
+        for idx, entry in enumerate(env_entries, 1):
+            phone = entry["phone"]
+            auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
+            bound_qq = "未绑定"
+            for qq, data in self.cache.items():
+                for acc in data["accounts"]:
+                    if acc["phone"] == phone:
+                        bound_qq = qq
+                        break
+                if bound_qq != "未绑定":
+                    break
+            msg += f"{idx}. {phone} ｜ 授权: {auth_display} ｜ 绑定QQ: {bound_qq}\n"
+        msg += "请输入要删除的账号序号："
+        self._set_state(user_id, 'admin_delete_wait_select', admin_mode=True, tmp_data={'env_entries': env_entries})
+        yield event.plain_result(msg)
+
+    async def _admin_delete_select_handle(self, event):
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'admin_delete_wait_select':
+            return
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
+            return
+        try:
+            idx = int(current_text)
+        except:
+            yield event.plain_result("❌ 请输入有效的数字")
+            return
+        env_entries = state_info.get('tmp_data', {}).get('env_entries', [])
+        if idx < 1 or idx > len(env_entries):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
+            return
+        phone_to_del = env_entries[idx-1]["phone"]
+        self._set_state(user_id, 'admin_delete_wait_confirm', admin_mode=True, tmp_data={'phone_to_del': phone_to_del})
+        yield event.plain_result(f"⚠️ 确认删除该账号（{phone_to_del}）吗？回复 y 确认，n 取消，数字忽略。")
+
+    async def _admin_do_delete(self, phone: str) -> str:
+        deleted = False
+        for qq, data in self.cache.items():
+            accounts = data["accounts"]
+            for idx, acc in enumerate(accounts):
+                if acc["phone"] == phone:
+                    del accounts[idx]
+                    self._update_cache_user(qq, accounts)
+                    deleted = True
+                    break
+        env_entries = await self._get_all_env_entries()
+        env_entries = [e for e in env_entries if e["phone"] != phone]
+        await self._save_all_env_entries(env_entries)
+        if deleted:
+            return f"✅ 已删除手机号 {phone}（从所有绑定和环境变量中移除）"
+        else:
+            return f"✅ 已从环境变量删除手机号 {phone}（未发现绑定记录）"
+
+    # ---------- 修改授权次数子操作 ----------
+    async def _admin_auth_select(self, event):
+        user_id = self._get_user_id(event)
+        env_entries = await self._get_all_env_entries()
+        if not env_entries:
+            yield event.plain_result("❌ 环境变量中暂无账号")
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+        msg = "📋 所有环境变量账号（当前授权次数）：\n"
+        for idx, entry in enumerate(env_entries, 1):
+            auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
+            msg += f"{idx}. {entry['phone']} ｜ 授权: {auth_display}\n"
+        msg += "请输入要修改授权次数的账号序号："
+        self._set_state(user_id, 'admin_auth_wait_select', admin_mode=True, tmp_data={'env_entries': env_entries})
+        yield event.plain_result(msg)
+
+    async def _admin_auth_select_handle(self, event):
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'admin_auth_wait_select':
+            return
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
+            return
+        try:
+            idx = int(current_text)
+        except:
+            yield event.plain_result("❌ 请输入有效的数字")
+            return
+        env_entries = state_info.get('tmp_data', {}).get('env_entries', [])
+        if idx < 1 or idx > len(env_entries):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
+            return
+        phone = env_entries[idx-1]["phone"]
+        self._set_state(user_id, 'admin_auth_wait_new_value', admin_mode=True, tmp_data={'phone': phone})
+        yield event.plain_result(f"已选择账号 {phone}，请输入新的授权次数（数字）或输入 '无限制'：")
+
+    # ---------- 提现审核子操作 ----------
+    async def _admin_withdraw_select(self, event):
+        user_id = self._get_user_id(event)
+        env_entries = await self._get_all_env_entries()
+        if not env_entries:
+            yield event.plain_result("❌ 环境变量中暂无账号")
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+        msg = "📋 所有环境变量账号（当前授权次数）：\n"
+        for idx, entry in enumerate(env_entries, 1):
+            auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
+            msg += f"{idx}. {entry['phone']} ｜ 授权: {auth_display}\n"
+        msg += "请输入要提现扣减的账号序号："
+        self._set_state(user_id, 'admin_withdraw_wait_select', admin_mode=True, tmp_data={'env_entries': env_entries})
+        yield event.plain_result(msg)
+
+    async def _admin_withdraw_select_handle(self, event):
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'admin_withdraw_wait_select':
+            return
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
+            return
+        try:
+            idx = int(current_text)
+        except:
+            yield event.plain_result("❌ 请输入有效的数字")
+            return
+        env_entries = state_info.get('tmp_data', {}).get('env_entries', [])
+        if idx < 1 or idx > len(env_entries):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(env_entries)} 之间的数字")
+            return
+        phone = env_entries[idx-1]["phone"]
+        for entry in env_entries:
+            if entry["phone"] == phone:
+                if entry["auth_count"] is None:
+                    yield event.plain_result(f"❌ 账号 {phone} 为无限制，无法提现扣减")
+                    self._set_state(user_id, 'idle', admin_mode=True)
+                    menu = await self._get_admin_menu_text()
+                    yield event.plain_result(menu)
+                    return
+                break
+        self._set_state(user_id, 'admin_withdraw_wait_amount', admin_mode=True, tmp_data={'phone': phone})
+        yield event.plain_result(f"已选择账号 {phone}，请输入要提现扣减的数量（正整数）：")
+
+    @filter.regex(r'^\d+$')
+    async def handle_admin_withdraw_amount(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        if user_id not in self.admin_qqs:
+            return
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'admin_withdraw_wait_amount':
+            return
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
+            return
+        try:
+            amount = int(current_text)
+        except:
+            yield event.plain_result("❌ 请输入有效的正整数")
+            return
+        if amount <= 0:
+            yield event.plain_result("❌ 提现数量须为正整数")
+            return
+        phone = state_info.get('tmp_data', {}).get('phone')
+        if not phone:
+            yield event.plain_result("❌ 会话错误，请重新操作")
+            self._set_state(user_id, 'idle', admin_mode=True)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+        result = await self._admin_do_withdraw(phone, amount)
+        yield event.plain_result(result)
+        self._set_state(user_id, 'idle', admin_mode=True)
+        menu = await self._get_admin_menu_text()
+        yield event.plain_result(menu)
+
+    async def _admin_do_withdraw(self, phone: str, amount: int) -> str:
+        env_entries = await self._get_all_env_entries()
+        entry_found = None
+        for entry in env_entries:
+            if entry["phone"] == phone:
+                entry_found = entry
+                break
+        if not entry_found:
+            return f"❌ 手机号 {phone} 不存在于环境变量中"
+        if entry_found["auth_count"] is None:
+            return f"❌ 账号 {phone} 为无限制，无法提现"
+        if entry_found["auth_count"] < amount:
+            return f"❌ 授权次数不足！当前 {entry_found['auth_count']}，需扣减 {amount}"
+        entry_found["auth_count"] -= amount
+        await self._save_all_env_entries(env_entries)
+        return f"✅ 提现成功！手机号 {phone} 减少 {amount} 次，剩余 {entry_found['auth_count']}"
+
+    # ---------- 重置用户子操作 ----------
+    async def _admin_reset_select(self, event):
+        user_id = self._get_user_id(event)
+        qq_list = [qq for qq, data in self.cache.items() if data.get("accounts")]
+        if not qq_list:
+            yield event.plain_result("📭 暂无任何用户绑定数据")
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+        msg = "📋 有绑定记录的QQ列表：\n"
+        for idx, qq in enumerate(qq_list, 1):
+            acc_count = len(self.cache[qq].get("accounts", []))
+            msg += f"{idx}. {qq} ｜ 账号数: {acc_count}\n"
+        msg += "请输入要重置的QQ序号："
+        self._set_state(user_id, 'admin_reset_wait_select', admin_mode=True, tmp_data={'qq_list': qq_list})
+        yield event.plain_result(msg)
+
+    async def _admin_reset_select_handle(self, event):
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'admin_reset_wait_select':
+            return
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
+            return
+        try:
+            idx = int(current_text)
+        except:
+            yield event.plain_result("❌ 请输入有效的数字")
+            return
+        qq_list = state_info.get('tmp_data', {}).get('qq_list', [])
+        if idx < 1 or idx > len(qq_list):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(qq_list)} 之间的数字")
+            return
+        target_qq = qq_list[idx-1]
+        await self._reset_user_data(target_qq)
+        yield event.plain_result(f"✅ 已重置用户 {target_qq} 的所有数据")
+        self._set_state(user_id, 'idle', admin_mode=True)
+        menu = await self._get_admin_menu_text()
+        yield event.plain_result(menu)
