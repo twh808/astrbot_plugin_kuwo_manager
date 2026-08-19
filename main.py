@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终稳定版（修复绑定 trigger_msg）"""
+    """酷我账号管理 - 增加解除绑定功能"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -32,7 +32,7 @@ class KuwoManagerPlugin(Star):
         self.state_info = {}
         self.TIMEOUT = 120
 
-        logger.info("✅ 酷我插件（最终稳定版）已加载")
+        logger.info("✅ 酷我插件（增加解除绑定）已加载")
         if self.admin_qqs:
             logger.info(f"管理员QQ: {', '.join(self.admin_qqs)}")
         else:
@@ -444,6 +444,7 @@ class KuwoManagerPlugin(Star):
             "[5] 修改授权次数（增/减/设）\n"
             "[6] 提现审核（扣减授权次数）\n"
             "[7] 重置用户所有数据\n"
+            "[8] 解除绑定（从QQ移除绑定，保留环境变量）\n"
             "[q] 退出"
         )
 
@@ -537,8 +538,12 @@ class KuwoManagerPlugin(Star):
                 self._set_state(user_id, 'admin_reset_wait_select', admin_mode=True, tmp_data={})
                 async for msg in self._admin_reset_select(event):
                     yield msg
+            elif num == 8:
+                self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, tmp_data={})
+                async for msg in self._admin_unbind_select(event):
+                    yield msg
             else:
-                yield event.plain_result("❌ 无效选项，请输入 1-7 或 q")
+                yield event.plain_result("❌ 无效选项，请输入 1-8 或 q")
         else:
             # 子状态：调用对应的处理函数
             if current_state == 'admin_bind_wait_phone_select':
@@ -558,6 +563,9 @@ class KuwoManagerPlugin(Star):
                 yield event.plain_result(menu)
             elif current_state == 'admin_delete_wait_select':
                 async for msg in self._admin_delete_select_handle(event):
+                    yield msg
+            elif current_state == 'admin_unbind_wait_select':
+                async for msg in self._admin_unbind_select_handle(event):
                     yield msg
             elif current_state == 'admin_auth_wait_select':
                 async for msg in self._admin_auth_select_handle(event):
@@ -721,7 +729,6 @@ class KuwoManagerPlugin(Star):
                 acc_count = len(self.cache[qq].get("accounts", []))
                 msg += f"{i}. {qq} ｜ 账号数: {acc_count}\n"
             msg += f"请输入要绑定到该手机号的QQ序号（或直接输入新QQ号）："
-            # 关键修复：进入 QQ 选择状态时，不传递 trigger_msg，避免用户输入的 QQ 序号被当作重复消息
             self._set_state(user_id, 'admin_bind_wait_qq_select', admin_mode=True, tmp_data={'selected_phone': selected_phone, 'qq_list': qq_list})
             yield event.plain_result(msg)
         else:
@@ -737,7 +744,6 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'admin_bind_wait_qq_select':
             return "状态错误，请重新操作"
         current_text = self._get_text(event)
-        # 这里不再检查 trigger_msg，因为进入此状态时 trigger_msg 已被清空
         tmp = state_info.get('tmp_data', {})
         selected_phone = tmp.get('selected_phone')
         qq_list = tmp.get('qq_list', [])
@@ -765,7 +771,6 @@ class KuwoManagerPlugin(Star):
         if state_info['state'] != 'admin_bind_wait_qq_input':
             return "状态错误，请重新操作"
         current_text = self._get_text(event)
-        # 同样不检查 trigger_msg
         if not current_text.isdigit():
             return "❌ QQ号须为数字"
         target_qq = current_text
@@ -797,6 +802,88 @@ class KuwoManagerPlugin(Star):
         if existing_owner and existing_owner != target_qq:
             msg += f"\n⚠️ 注意：该手机号原本属于用户 {existing_owner}，已被管理员强制迁移至 {target_qq}"
         return msg
+
+    # ---------- 解除绑定子操作（新增） ----------
+    async def _admin_unbind_select(self, event):
+        user_id = self._get_user_id(event)
+        # 列出所有已绑定的手机号（即环境变量中有且缓存中有QQ绑定的）
+        env_entries = await self._get_all_env_entries()
+        if not env_entries:
+            yield event.plain_result("❌ 环境变量中暂无账号")
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+
+        # 构建 phone -> qq 映射（从缓存中找）
+        phone_to_qq = {}
+        for qq, data in self.cache.items():
+            for acc in data.get("accounts", []):
+                phone_to_qq[acc["phone"]] = qq
+
+        # 只保留有绑定的手机号（即 phone_to_qq 中存在）
+        bound_list = []
+        for entry in env_entries:
+            phone = entry["phone"]
+            if phone in phone_to_qq:
+                bound_list.append({
+                    "phone": phone,
+                    "auth_count": entry["auth_count"],
+                    "qq": phone_to_qq[phone]
+                })
+
+        if not bound_list:
+            yield event.plain_result("✅ 没有已绑定的账号需要解除")
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+
+        msg = "📋 已绑定的账号列表（解除绑定将保留环境变量）：\n"
+        for idx, item in enumerate(bound_list, 1):
+            msg += f"{idx}. {item['phone']} ｜ 授权: {item['auth_count']} ｜ 绑定QQ: {item['qq']}\n"
+        msg += "请输入要解除绑定的账号序号："
+        self._set_state(user_id, 'admin_unbind_wait_select', admin_mode=True, tmp_data={'bound_list': bound_list})
+        yield event.plain_result(msg)
+
+    async def _admin_unbind_select_handle(self, event):
+        user_id = self._get_user_id(event)
+        state_info = self._get_state_info(user_id)
+        if state_info.get('timeout', False):
+            yield event.plain_result("⏰ 操作已超时，已退出交互。")
+            self._set_state(user_id, 'idle', admin_mode=False)
+            return
+        if state_info['state'] != 'admin_unbind_wait_select':
+            return
+        current_text = self._get_text(event)
+        if state_info.get('trigger_msg') == current_text:
+            return
+        try:
+            idx = int(current_text)
+        except:
+            yield event.plain_result("❌ 请输入有效的数字")
+            return
+        bound_list = state_info.get('tmp_data', {}).get('bound_list', [])
+        if idx < 1 or idx > len(bound_list):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(bound_list)} 之间的数字")
+            return
+        item = bound_list[idx-1]
+        phone = item["phone"]
+        qq = item["qq"]
+
+        # 从该 QQ 的 accounts 中移除该手机号
+        cache_user = self._get_cache_user(qq)
+        accounts = cache_user["accounts"]
+        new_accounts = [acc for acc in accounts if acc["phone"] != phone]
+        if len(new_accounts) == len(accounts):
+            yield event.plain_result(f"❌ 手机号 {phone} 不在用户 {qq} 的绑定列表中")
+            self._set_state(user_id, 'idle', admin_mode=True)
+            menu = await self._get_admin_menu_text()
+            yield event.plain_result(menu)
+            return
+        self._update_cache_user(qq, new_accounts)
+        yield event.plain_result(f"✅ 已解除绑定：手机号 {phone} 从 QQ {qq} 移除（环境变量中的账号保留）")
+        self._set_state(user_id, 'idle', admin_mode=True)
+        menu = await self._get_admin_menu_text()
+        yield event.plain_result(menu)
 
     # ---------- 删除账号子操作 ----------
     async def _admin_delete_select(self, event):
