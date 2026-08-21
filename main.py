@@ -18,6 +18,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
+# ---------- 酷我验证码发送核心函数 ----------
 SIGN_BASE = 'https://integralapi.kuwo.cn/api/v1/online/sign'
 URL_USER_ASSET = SIGN_BASE + '/v1/earningSignIn/earningUserSignList'
 URL_NEW_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/newDoListen'
@@ -318,8 +319,18 @@ class KuwoManagerPlugin(Star):
         self._env_id_cache = {}
         self._env_id_cache_time = 0
 
-        logger.info("✅ 酷我插件加载完成")
+        logger.info("✅ 酷我插件（带耗时日志）已加载")
 
+    # ---------- 辅助：耗时日志 ----------
+    async def _log_time(self, operation: str, start: float):
+        elapsed = (time.time() - start) * 1000
+        logger.info(f"⏱️ {operation} 耗时: {elapsed:.1f}ms")
+
+    def _log_sync_time(self, operation: str, start: float):
+        elapsed = (time.time() - start) * 1000
+        logger.info(f"⏱️ {operation} 耗时: {elapsed:.1f}ms")
+
+    # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
         if os.path.exists(self.cache_file):
             try:
@@ -346,8 +357,11 @@ class KuwoManagerPlugin(Star):
         self.cache[user_id] = {"accounts": accounts}
         self._save_cache()
 
+    # ---------- 呆呆面板 API ----------
     async def _get_token(self):
+        start = time.time()
         if self.token and self.token_expiry > time.time():
+            await self._log_time("获取Token（缓存）", start)
             return self.token
         if not all([self.base_url, self.app_key, self.app_secret]):
             raise Exception("呆呆面板配置不完整")
@@ -365,9 +379,11 @@ class KuwoManagerPlugin(Star):
                 expires_in = result.get("data", {}).get("expires_in", 86400)
                 self.token_expiry = time.time() + expires_in - 60
                 self.token = token
+                await self._log_time("获取Token（网络）", start)
                 return token
 
     async def _call_api(self, endpoint: str, method: str = "POST", data: dict = None):
+        start = time.time()
         token = await self._get_token()
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
@@ -378,16 +394,21 @@ class KuwoManagerPlugin(Star):
                     self.token_expiry = 0
                     return await self._call_api(endpoint, method, data)
                 try:
-                    return await resp.json()
+                    result = await resp.json()
+                    await self._log_time(f"API调用 {endpoint}", start)
+                    return result
                 except:
+                    await self._log_time(f"API调用 {endpoint}（异常）", start)
                     return {"error": f"HTTP {resp.status}", "detail": await resp.text()}
 
     async def _fetch_env_list(self):
+        start = time.time()
         result = await self._call_api("envs?page=1&page_size=100", method="GET")
+        await self._log_time("获取环境变量列表", start)
         return result.get("data", [])
 
     async def _get_env_id_by_name(self, env_name: str) -> int:
-        # 直接从缓存获取，缓存失效时更新
+        start = time.time()
         now = time.time()
         if (now - self._env_id_cache_time) > 60:
             envs = await self._fetch_env_list()
@@ -395,9 +416,12 @@ class KuwoManagerPlugin(Star):
             for env in envs:
                 self._env_id_cache[env.get("name")] = env.get("id")
             self._env_id_cache_time = now
-        return self._env_id_cache.get(env_name)
+        result = self._env_id_cache.get(env_name)
+        await self._log_time(f"获取env_id {env_name}", start)
+        return result
 
     async def _update_env_value(self, env_name: str, new_value: str) -> bool:
+        start = time.time()
         env_id = await self._get_env_id_by_name(env_name)
         if env_id is None:
             payload = {"name": env_name, "value": new_value, "group": "默认分组"}
@@ -409,11 +433,14 @@ class KuwoManagerPlugin(Star):
         if env_name == self.code_env_name:
             self._code_env_cache = None
             self._code_env_cache_time = 0
+        await self._log_time(f"更新环境变量 {env_name}", start)
         return result.get("code") in [0, None, ""] and not result.get("error")
 
     async def _get_all_env_entries(self) -> list:
+        start = time.time()
         now = time.time()
         if self._env_cache is not None and (now - self._env_cache_time) < self._env_cache_ttl:
+            await self._log_time("读取kwtx（缓存命中）", start)
             return self._env_cache
         envs = await self._fetch_env_list()
         value = ""
@@ -443,9 +470,11 @@ class KuwoManagerPlugin(Star):
                     entries.append({"phone": phone, "password": password, "auth_count": auth_count})
         self._env_cache = entries
         self._env_cache_time = now
+        await self._log_time("读取kwtx（缓存未命中，网络请求）", start)
         return entries
 
     async def _save_all_env_entries(self, entries: list) -> bool:
+        start = time.time()
         if not entries:
             new_value = ""
         else:
@@ -460,11 +489,14 @@ class KuwoManagerPlugin(Star):
         if result:
             self._env_cache = entries
             self._env_cache_time = time.time()
+        await self._log_time("保存kwtx", start)
         return result
 
     async def _get_code_env_value(self) -> str:
+        start = time.time()
         now = time.time()
         if self._code_env_cache is not None and (now - self._code_env_cache_time) < 10:
+            await self._log_time("读取CODE（缓存命中）", start)
             return self._code_env_cache
         value = ""
         env_id = await self._get_env_id_by_name(self.code_env_name)
@@ -476,9 +508,11 @@ class KuwoManagerPlugin(Star):
                     break
         self._code_env_cache = value
         self._code_env_cache_time = now
+        await self._log_time("读取CODE（网络请求）", start)
         return value
 
     async def _update_code_env(self, phone: str, code: str) -> bool:
+        start = time.time()
         current = await self._get_code_env_value()
         lines = current.split('\n') if current else []
         lines = [line.strip() for line in lines if line.strip()]
@@ -497,7 +531,9 @@ class KuwoManagerPlugin(Star):
         if not found:
             new_lines.append(f"{phone}#{code}")
         new_value = '\n'.join(new_lines)
-        return await self._update_env_value(self.code_env_name, new_value)
+        result = await self._update_env_value(self.code_env_name, new_value)
+        await self._log_time("更新CODE", start)
+        return result
 
     async def _get_my_accounts(self, user_id: str) -> list:
         return self._get_cache_user(user_id)["accounts"]
@@ -528,6 +564,7 @@ class KuwoManagerPlugin(Star):
         return False
 
     async def _reset_user_data(self, user_id: str) -> bool:
+        start = time.time()
         cache_user = self._get_cache_user(user_id)
         phones = [acc["phone"] for acc in cache_user["accounts"]]
         self.cache[user_id] = {"accounts": []}
@@ -536,6 +573,7 @@ class KuwoManagerPlugin(Star):
             env_entries = await self._get_all_env_entries()
             env_entries = [e for e in env_entries if e["phone"] not in phones]
             await self._save_all_env_entries(env_entries)
+        await self._log_time("重置用户数据", start)
         return True
 
     def _get_user_id(self, event: AstrMessageEvent) -> str:
@@ -643,12 +681,14 @@ class KuwoManagerPlugin(Star):
             del self.timeout_tasks[user_id]
 
     async def _send_withdraw_code(self, phones: list, quota_id: str = '60004') -> str:
+        start = time.time()
         if not phones:
             return "❌ 未指定任何手机号。"
         env_entries = await self._get_all_env_entries()
         phone_to_pass = {entry['phone']: entry['password'] for entry in env_entries}
         results = []
         for phone in phones:
+            phone_start = time.time()
             password = phone_to_pass.get(phone)
             if not password:
                 results.append(f"❌ {phone}: 未在环境变量中找到密码，跳过。")
@@ -667,6 +707,8 @@ class KuwoManagerPlugin(Star):
                 results.append(f"✅ {phone}: 验证码发送成功")
             else:
                 results.append(f"❌ {phone}: 发送失败 ({msg})")
+            self._log_sync_time(f"发送验证码 {phone}", phone_start)
+        await self._log_time("发送验证码（全部）", start)
         return "\n".join(results)
 
     def _sync_send_codes(self, phones):
@@ -674,6 +716,7 @@ class KuwoManagerPlugin(Star):
         return asyncio.run(self._send_withdraw_code(phones, quota_id))
 
     async def _get_menu_text(self, user_id: str) -> str:
+        start = time.time()
         my_acc = await self._get_my_accounts(user_id)
         count = len(my_acc)
         total, has_unlimited = await self._get_user_total_auth(user_id)
@@ -681,6 +724,7 @@ class KuwoManagerPlugin(Star):
             total_display = "不限"
         else:
             total_display = str(total)
+        await self._log_time("生成菜单文本", start)
         return (f"=====酷我=====\n账号{count}个，可用次数{total_display}\n[1] 提交账号\n[2] 删除账号\n[3] 查询授权次数明细\n[4] 发送验证码\n[5] 提交验证码\n[r] 重置我的所有数据\n[q] 退出")
 
     async def _get_admin_menu_text(self) -> str:
@@ -921,6 +965,7 @@ class KuwoManagerPlugin(Star):
 
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
+        overall_start = time.time()
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
         if info.get('timeout_triggered', False):
@@ -962,6 +1007,7 @@ class KuwoManagerPlugin(Star):
         self._schedule_timeout(user_id)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
+        await self._log_time("提交验证码（整体流程）", overall_start)
 
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
@@ -1398,7 +1444,7 @@ class KuwoManagerPlugin(Star):
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
 
-    # ---------- 管理员辅助方法 ----------
+    # ---------- 管理员辅助方法（略，与之前相同） ----------
     async def _admin_view_all_bindings(self) -> str:
         if not self.cache:
             return "📭 暂无任何用户绑定数据"
@@ -1436,6 +1482,7 @@ class KuwoManagerPlugin(Star):
             msg += f"📱 {phone} ｜ 授权: {auth_display} ｜ 绑定QQ: {qq}\n"
         return msg
 
+    # 以下为管理员子操作（未改动，略）
     async def _admin_bind_select_phone(self, event):
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
