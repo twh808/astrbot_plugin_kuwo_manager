@@ -318,11 +318,8 @@ class KuwoManagerPlugin(Star):
         self._code_cache_ttl = 600
         self._code_env_id = None
 
-        # 后台任务跟踪
-        self._update_tasks = {}
-
         asyncio.create_task(self._preload())
-        logger.info("✅ 酷我插件（异步更新优化版）已加载")
+        logger.info("✅ 酷我插件（同步更新版）已加载")
 
     async def _preload(self):
         try:
@@ -527,14 +524,12 @@ class KuwoManagerPlugin(Star):
         await self._log_time("读取CODE（缓存未命中，网络）", start)
         return value
 
-    async def _update_code_env(self, phone: str, code: str, umo: str) -> bool:
-        if phone in self._update_tasks:
-            self._update_tasks[phone].cancel()
-        task = asyncio.create_task(self._async_update_code(phone, code, umo))
-        self._update_tasks[phone] = task
-        return True
+    async def _update_code_env(self, phone: str, code: str) -> bool:
+        """同步执行更新，返回是否成功"""
+        return await self._sync_update_code(phone, code)
 
-    async def _async_update_code(self, phone: str, code: str, umo: str):
+    async def _sync_update_code(self, phone: str, code: str) -> bool:
+        """真正执行更新，返回是否成功"""
         try:
             start = time.time()
             current = await self._get_code_env_value()
@@ -559,18 +554,11 @@ class KuwoManagerPlugin(Star):
             if not result and self._code_env_id is not None:
                 self._code_env_id = None
                 result = await self._update_env_value(self.code_env_name, new_value, None)
-            chain = MessageChain().message(f"✅ 验证码已提交：手机号 {phone} -> {code}" if result else f"❌ 验证码提交失败：手机号 {phone}")
-            await self.context.send_message(umo, chain)
-            await self._log_time(f"后台更新CODE（{phone}）", start)
-        except asyncio.CancelledError:
-            logger.info(f"后台更新任务被取消: {phone}")
+            await self._log_time(f"更新CODE（{phone}）", start)
+            return result
         except Exception as e:
-            logger.error(f"后台更新异常: {e}")
-            try:
-                chain = MessageChain().message(f"❌ 验证码提交异常：{phone} - {str(e)}")
-                await self.context.send_message(umo, chain)
-            except:
-                pass
+            logger.error(f"更新验证码异常: {e}")
+            return False
 
     async def _get_my_accounts(self, user_id: str) -> list:
         return self._get_cache_user(user_id)["accounts"]
@@ -1032,9 +1020,13 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
             return
-        umo = event.unified_msg_origin
-        yield event.plain_result("⏳ 正在提交验证码，请稍候...")
-        await self._update_code_env(phone, code, umo)
+        # 同步执行更新
+        success = await self._update_code_env(phone, code)
+        if success:
+            yield event.plain_result(f"✅ 验证码已提交：手机号 {phone} -> {code}")
+        else:
+            yield event.plain_result(f"❌ 验证码提交失败：手机号 {phone}")
+        # 重置状态并返回菜单
         self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
         self._cancel_timeout(user_id)
         umo = event.unified_msg_origin
