@@ -18,7 +18,6 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
-# ---------- 酷我验证码发送核心函数（完整移植） ----------
 SIGN_BASE = 'https://integralapi.kuwo.cn/api/v1/online/sign'
 URL_USER_ASSET = SIGN_BASE + '/v1/earningSignIn/earningUserSignList'
 URL_NEW_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/newDoListen'
@@ -285,8 +284,6 @@ def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'
 
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - TTL=600秒 + 异步刷新"""
-
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         if config is None:
@@ -298,39 +295,31 @@ class KuwoManagerPlugin(Star):
         self.token_expiry = 0
         self.env_name = "kwtx"
         self.code_env_name = "CODE"
-
         admin_str = config.get("admin_qq", "").strip()
         self.admin_qqs = [qq.strip() for qq in admin_str.split(',') if qq.strip()]
-
         self.data_dir = os.path.join(os.getcwd(), "data", "kuwo_data")
         self.cache_file = os.path.join(self.data_dir, "user_data.json")
         os.makedirs(self.data_dir, exist_ok=True)
         self.cache = self._load_cache()
-
         self.state_info = {}
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        # ---------- 环境变量缓存（TTL=600秒） ----------
+        # 环境变量缓存（TTL=300秒，无后台刷新）
         self._env_cache = None
         self._env_cache_time = 0
-        self._env_cache_ttl = 600  # 10分钟
+        self._env_cache_ttl = 300
 
-        # 预加载环境变量
-        asyncio.create_task(self._preload_env())
+        # CODE 环境变量缓存（TTL=10秒）
+        self._code_env_cache = None
+        self._code_env_cache_time = 0
 
-        logger.info("✅ 酷我插件（TTL=600s）已加载")
+        # env_id 缓存（TTL=60秒）
+        self._env_id_cache = {}
+        self._env_id_cache_time = 0
 
-    # ---------- 预加载 ----------
-    async def _preload_env(self):
-        """后台预加载环境变量，不阻塞启动"""
-        try:
-            await self._get_all_env_entries()
-            logger.info("✅ 环境变量预加载完成")
-        except Exception as e:
-            logger.warning(f"环境变量预加载失败: {e}")
+        logger.info("✅ 酷我插件加载完成")
 
-    # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
         if os.path.exists(self.cache_file):
             try:
@@ -357,7 +346,6 @@ class KuwoManagerPlugin(Star):
         self.cache[user_id] = {"accounts": accounts}
         self._save_cache()
 
-    # ---------- 呆呆面板 API ----------
     async def _get_token(self):
         if self.token and self.token_expiry > time.time():
             return self.token
@@ -399,11 +387,15 @@ class KuwoManagerPlugin(Star):
         return result.get("data", [])
 
     async def _get_env_id_by_name(self, env_name: str) -> int:
-        envs = await self._fetch_env_list()
-        for env in envs:
-            if env.get("name") == env_name:
-                return env.get("id")
-        return None
+        # 直接从缓存获取，缓存失效时更新
+        now = time.time()
+        if (now - self._env_id_cache_time) > 60:
+            envs = await self._fetch_env_list()
+            self._env_id_cache = {}
+            for env in envs:
+                self._env_id_cache[env.get("name")] = env.get("id")
+            self._env_id_cache_time = now
+        return self._env_id_cache.get(env_name)
 
     async def _update_env_value(self, env_name: str, new_value: str) -> bool:
         env_id = await self._get_env_id_by_name(env_name)
@@ -413,23 +405,22 @@ class KuwoManagerPlugin(Star):
         else:
             payload = {"name": env_name, "value": new_value}
             result = await self._call_api(f"envs/{env_id}", method="PUT", data=payload)
+        # 如果更新的是 CODE，清除 CODE 缓存
+        if env_name == self.code_env_name:
+            self._code_env_cache = None
+            self._code_env_cache_time = 0
         return result.get("code") in [0, None, ""] and not result.get("error")
 
-    # ---------- 环境变量读写（kwtx，支持无限制） + 缓存 ----------
     async def _get_all_env_entries(self) -> list:
         now = time.time()
-        # 缓存有效，直接返回
         if self._env_cache is not None and (now - self._env_cache_time) < self._env_cache_ttl:
             return self._env_cache
-
-        # 缓存失效，重新获取（合并请求，只需一次）
         envs = await self._fetch_env_list()
         value = ""
         for env in envs:
             if env.get("name") == self.env_name:
                 value = env.get("value", "")
                 break
-
         if not value:
             entries = []
         else:
@@ -450,7 +441,6 @@ class KuwoManagerPlugin(Star):
                         except:
                             auth_count = None
                     entries.append({"phone": phone, "password": password, "auth_count": auth_count})
-
         self._env_cache = entries
         self._env_cache_time = now
         return entries
@@ -472,8 +462,10 @@ class KuwoManagerPlugin(Star):
             self._env_cache_time = time.time()
         return result
 
-    # ---------- 验证码环境变量读写 ----------
     async def _get_code_env_value(self) -> str:
+        now = time.time()
+        if self._code_env_cache is not None and (now - self._code_env_cache_time) < 10:
+            return self._code_env_cache
         value = ""
         env_id = await self._get_env_id_by_name(self.code_env_name)
         if env_id:
@@ -482,6 +474,8 @@ class KuwoManagerPlugin(Star):
                 if env.get("id") == env_id:
                     value = env.get("value", "")
                     break
+        self._code_env_cache = value
+        self._code_env_cache_time = now
         return value
 
     async def _update_code_env(self, phone: str, code: str) -> bool:
@@ -505,7 +499,6 @@ class KuwoManagerPlugin(Star):
         new_value = '\n'.join(new_lines)
         return await self._update_env_value(self.code_env_name, new_value)
 
-    # ---------- 账号相关 ----------
     async def _get_my_accounts(self, user_id: str) -> list:
         return self._get_cache_user(user_id)["accounts"]
 
@@ -545,7 +538,6 @@ class KuwoManagerPlugin(Star):
             await self._save_all_env_entries(env_entries)
         return True
 
-    # ---------- 辅助 ----------
     def _get_user_id(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'get_user_id'):
             return event.get_user_id()
@@ -573,7 +565,6 @@ class KuwoManagerPlugin(Star):
             return event.raw_message.strip()
         return ""
 
-    # ---------- 状态管理 ----------
     def _get_state_info(self, user_id: str) -> dict:
         now = time.time()
         if user_id not in self.state_info:
@@ -613,7 +604,6 @@ class KuwoManagerPlugin(Star):
             info['in_menu'] = False
             info['timeout_triggered'] = False
 
-    # ---------- 超时任务管理 ----------
     async def _timeout_callback(self, user_id: str):
         info = self._get_state_info(user_id)
         if info['in_menu'] or info['state'] != 'idle':
@@ -652,7 +642,6 @@ class KuwoManagerPlugin(Star):
             self.timeout_tasks[user_id].cancel()
             del self.timeout_tasks[user_id]
 
-    # ---------- 验证码发送功能 ----------
     async def _send_withdraw_code(self, phones: list, quota_id: str = '60004') -> str:
         if not phones:
             return "❌ 未指定任何手机号。"
@@ -684,7 +673,6 @@ class KuwoManagerPlugin(Star):
         quota_id = os.getenv('QUOTA_ID', '60004')
         return asyncio.run(self._send_withdraw_code(phones, quota_id))
 
-    # ---------- 菜单 ----------
     async def _get_menu_text(self, user_id: str) -> str:
         my_acc = await self._get_my_accounts(user_id)
         count = len(my_acc)
@@ -693,34 +681,11 @@ class KuwoManagerPlugin(Star):
             total_display = "不限"
         else:
             total_display = str(total)
-        return (
-            f"=====酷我=====\n"
-            f"账号{count}个，可用次数{total_display}\n"
-            "[1] 提交账号\n"
-            "[2] 删除账号\n"
-            "[3] 查询授权次数明细\n"
-            "[4] 发送验证码\n"
-            "[5] 提交验证码\n"
-            "[r] 重置我的所有数据\n"
-            "[q] 退出"
-        )
+        return (f"=====酷我=====\n账号{count}个，可用次数{total_display}\n[1] 提交账号\n[2] 删除账号\n[3] 查询授权次数明细\n[4] 发送验证码\n[5] 提交验证码\n[r] 重置我的所有数据\n[q] 退出")
 
     async def _get_admin_menu_text(self) -> str:
-        return (
-            "=====管理面板=====\n"
-            "[1] 查看所有绑定关系\n"
-            "[2] 查看所有环境变量账号\n"
-            "[3] 绑定账号（为QQ绑定手机号）\n"
-            "[4] 解除绑定（从QQ移除绑定，保留环境变量）\n"
-            "[5] 删除账号（从所有绑定和环境变量移除）\n"
-            "[6] 修改授权次数（设置具体值或无限制）\n"
-            "[7] 提现审核（扣减授权次数）\n"
-            "[8] 重置用户所有数据\n"
-            "[9] 发送验证码（全部账号）\n"
-            "[q] 退出"
-        )
+        return ("=====管理面板=====\n[1] 查看所有绑定关系\n[2] 查看所有环境变量账号\n[3] 绑定账号（为QQ绑定手机号）\n[4] 解除绑定（从QQ移除绑定，保留环境变量）\n[5] 删除账号（从所有绑定和环境变量移除）\n[6] 修改授权次数（设置具体值或无限制）\n[7] 提现审核（扣减授权次数）\n[8] 重置用户所有数据\n[9] 发送验证码（全部账号）\n[q] 退出")
 
-    # ---------- 全局 q 处理器 ----------
     @filter.regex(r'^[qQ]$')
     async def handle_global_q(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -735,23 +700,19 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         current_state = info['state']
         admin_mode = info.get('admin_mode', False)
         in_menu = info.get('in_menu', False)
-
         if current_state == 'menu_idle' and in_menu:
             yield event.plain_result("👋 已退出菜单")
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
             self._cancel_timeout(user_id)
             return
-
         if current_state == 'admin_menu_idle' and in_menu and admin_mode:
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
             self._cancel_timeout(user_id)
             return
-
         if in_menu and current_state not in ['idle', 'menu_idle', 'admin_menu_idle']:
             if admin_mode:
                 yield event.plain_result("👋 已取消操作，返回管理面板")
@@ -769,7 +730,6 @@ class KuwoManagerPlugin(Star):
                 yield event.plain_result(menu)
             return
 
-    # ---------- 普通用户菜单 ----------
     @filter.command("酷我")
     async def kuwo_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -784,7 +744,6 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if info.get('admin_mode', False):
             yield event.plain_result("👋 已退出管理面板")
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
@@ -810,15 +769,12 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if info.get('admin_mode', False):
             return
         if not info.get('in_menu', False) or info['state'] != 'menu_idle':
             return
-
         text = self._get_text(event).lower()
         umo = event.unified_msg_origin
-
         if text == '1':
             self._set_state(user_id, 'waiting_phone', admin_mode=False, in_menu=True, umo=umo)
             self._schedule_timeout(user_id)
@@ -857,8 +813,7 @@ class KuwoManagerPlugin(Star):
             self._schedule_timeout(user_id)
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
-
-        elif text == '4':   # 发送验证码
+        elif text == '4':
             my_acc = await self._get_my_accounts(user_id)
             if not my_acc:
                 yield event.plain_result("❌ 您没有绑定任何账号，无法发送验证码。")
@@ -870,12 +825,9 @@ class KuwoManagerPlugin(Star):
             lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
             prompt = "选择要发送验证码的账号序号（可多选，用逗号分隔，如 1,3），或输入 all 发送全部：\n" + "\n".join(lines) + "\n（发送 q 取消）："
             yield event.plain_result(prompt)
-            self._set_state(user_id, 'waiting_send_select', admin_mode=False,
-                           tmp_data={'all_phones': [acc['phone'] for acc in my_acc]},
-                           in_menu=True, umo=umo, trigger_msg=text)
+            self._set_state(user_id, 'waiting_send_select', admin_mode=False, tmp_data={'all_phones': [acc['phone'] for acc in my_acc]}, in_menu=True, umo=umo, trigger_msg=text)
             self._schedule_timeout(user_id)
-
-        elif text == '5':   # 提交验证码
+        elif text == '5':
             my_acc = await self._get_my_accounts(user_id)
             if not my_acc:
                 yield event.plain_result("❌ 您没有绑定任何账号，请先提交账号")
@@ -889,7 +841,6 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(prompt)
             self._set_state(user_id, 'waiting_code_phone', admin_mode=False, trigger_msg=text, in_menu=True, umo=umo)
             self._schedule_timeout(user_id)
-
         elif text == 'r':
             await self._reset_user_data(user_id)
             yield event.plain_result("✅ 您的所有数据已重置")
@@ -898,7 +849,6 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
 
-    # ---------- 选择发送账号（修复：忽略触发消息） ----------
     @filter.regex(r'^.+$')
     async def handle_send_selection(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -913,19 +863,13 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if info['state'] != 'waiting_send_select' or not info.get('in_menu', False):
             return
-
         text = self._get_text(event).strip().lower()
         all_phones = info.get('tmp_data', {}).get('all_phones', [])
         umo = info.get('umo')
-
-        # 关键：忽略触发消息（即刚进入该状态时发送的那条消息）
         if text == info.get('trigger_msg'):
             return
-
-        # 返回菜单
         if text in ['q', 'x', '取消', 'back', '-1', '返回']:
             yield event.plain_result("👋 已返回菜单。")
             self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
@@ -933,12 +877,9 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
             return
-
-        # 全选：all 或 0
         if text == 'all' or text == '0':
             phones = all_phones
         else:
-            # 解析逗号分隔的序号
             try:
                 indices = [int(x.strip()) for x in text.split(',') if x.strip().isdigit()]
             except ValueError:
@@ -947,7 +888,6 @@ class KuwoManagerPlugin(Star):
                 prompt = "选择要发送验证码的账号序号（可多选，用逗号分隔，如 1,3），输入 0/all 发送全部：\n" + "\n".join(lines) + "\n（输入 -1/back/q/取消 返回菜单）："
                 yield event.plain_result(prompt)
                 return
-
             phones = []
             invalid_indices = []
             for idx in indices:
@@ -955,14 +895,12 @@ class KuwoManagerPlugin(Star):
                     phones.append(all_phones[idx-1])
                 else:
                     invalid_indices.append(str(idx))
-
             if invalid_indices:
                 yield event.plain_result(f"❌ 序号 {', '.join(invalid_indices)} 无效，有效范围 1-{len(all_phones)}。")
                 lines = [f"{idx+1}. {phone}" for idx, phone in enumerate(all_phones)]
                 prompt = "选择要发送验证码的账号序号（可多选，用逗号分隔，如 1,3），输入 0/all 发送全部：\n" + "\n".join(lines) + "\n（输入 -1/back/q/取消 返回菜单）："
                 yield event.plain_result(prompt)
                 return
-
             if not phones:
                 yield event.plain_result("❌ 未选择任何账号。")
                 self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
@@ -970,22 +908,17 @@ class KuwoManagerPlugin(Star):
                 menu = await self._get_menu_text(user_id)
                 yield event.plain_result(menu)
                 return
-
-        # 执行发送
         yield event.plain_result(f"⏳ 正在为 {len(phones)} 个账号发送验证码，请稍候...")
         try:
             result = await asyncio.to_thread(self._sync_send_codes, phones)
             yield event.plain_result(result)
         except Exception as e:
             yield event.plain_result(f"❌ 发送异常: {e}")
-
-        # 返回菜单
         self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
         self._schedule_timeout(user_id)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 提交验证码：输入验证码 ----------
     @filter.regex(r'^.+$')
     async def handle_code_input(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -1000,13 +933,10 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if info['state'] == 'waiting_send_select':
-            return  # 已由 handle_send_selection 处理
-
+            return
         if info['state'] != 'waiting_code_input' or not info.get('in_menu', False):
             return
-
         text = self._get_text(event)
         code = text
         if not code:
@@ -1021,22 +951,18 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
             return
-
         self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
         self._cancel_timeout(user_id)
-
         if await self._update_code_env(phone, code):
             yield event.plain_result(f"✅ 验证码已提交：手机号 {phone} -> {code}")
         else:
             yield event.plain_result("❌ 提交验证码失败，请稍后重试")
-
         umo = event.unified_msg_origin
         self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
         self._schedule_timeout(user_id)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 提交验证码：选择手机号 ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -1051,10 +977,8 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if info['state'] == 'waiting_send_select':
             return
-
         if info['state'] != 'waiting_code_phone' or not info.get('in_menu', False):
             return
         current_text = self._get_text(event)
@@ -1065,7 +989,6 @@ class KuwoManagerPlugin(Star):
         except:
             yield event.plain_result("❌ 请输入有效的数字")
             return
-
         my_acc = await self._get_my_accounts(user_id)
         if idx < 1 or idx > len(my_acc):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(my_acc)} 之间的数字")
@@ -1076,7 +999,6 @@ class KuwoManagerPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
-    # ---------- 提交账号（普通用户） ----------
     @filter.regex(r'^\d{11}#.+$')
     async def handle_phone_submit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -1091,15 +1013,12 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if info['state'] != 'waiting_phone' or not info.get('in_menu', False):
             return
-
         text = self._get_text(event)
         phone, password = text.split('#', 1)
         phone = phone.strip()
         password = password.strip()
-
         if self._is_phone_owned_by_other(user_id, phone):
             yield event.plain_result(f"❌ 手机号 {phone} 已被其他用户绑定")
             umo = event.unified_msg_origin
@@ -1108,7 +1027,6 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
             return
-
         cache_user = self._get_cache_user(user_id)
         my_acc = cache_user["accounts"]
         found = None
@@ -1133,14 +1051,12 @@ class KuwoManagerPlugin(Star):
             env_entries.append({"phone": phone, "password": password, "auth_count": None})
             await self._save_all_env_entries(env_entries)
             yield event.plain_result(f"✅ 账号 {phone} 已保存（默认无限制）")
-
         umo = event.unified_msg_origin
         self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
         self._schedule_timeout(user_id)
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 删除账号（普通用户） ----------
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -1155,7 +1071,6 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if info['state'] != 'waiting_delete' or not info.get('in_menu', False):
             return
         current_text = self._get_text(event)
@@ -1171,7 +1086,6 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
             return
-
         cache_user = self._get_cache_user(user_id)
         my_acc = cache_user["accounts"]
         if idx < 1 or idx > len(my_acc):
@@ -1182,14 +1096,12 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
             return
-
         phone_to_del = my_acc[idx-1]["phone"]
         del my_acc[idx-1]
         self._update_cache_user(user_id, my_acc)
         env_entries = await self._get_all_env_entries()
         env_entries = [e for e in env_entries if e["phone"] != phone_to_del]
         await self._save_all_env_entries(env_entries)
-
         yield event.plain_result(f"✅ 已删除账号 {phone_to_del}")
         umo = event.unified_msg_origin
         self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
@@ -1197,7 +1109,6 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
-    # ---------- 管理员交互 ----------
     @filter.command("酷我管理")
     async def admin_menu(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -1215,7 +1126,6 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if info.get('admin_mode', False):
             yield event.plain_result("👋 已退出普通用户菜单")
             self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
@@ -1227,7 +1137,6 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_admin_menu_text()
         yield event.plain_result(menu)
 
-    # ---------- 数字专用处理器（管理员） ----------
     @filter.regex(r'^\d+$')
     async def handle_admin_digit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -1244,20 +1153,16 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if not info.get('admin_mode', False) or not info.get('in_menu', False):
             return
-
         current_state = info['state']
         text = self._get_text(event)
         try:
             num = int(text)
         except:
             return
-
         if current_state == 'admin_delete_wait_confirm':
             return
-
         if current_state == 'admin_auth_wait_new_value':
             phone = info.get('tmp_data', {}).get('phone')
             if not phone:
@@ -1296,7 +1201,6 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
-
         if current_state == 'admin_menu_idle':
             umo = event.unified_msg_origin
             if num == 1:
@@ -1412,7 +1316,6 @@ class KuwoManagerPlugin(Star):
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
 
-    # ---------- 非数字通用处理器（管理员） ----------
     @filter.regex(r'^[^0-9].*$')
     async def handle_admin_non_digit(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -1429,13 +1332,10 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if not info.get('admin_mode', False) or not info.get('in_menu', False):
             return
-
         current_state = info['state']
         text = self._get_text(event).strip()
-
         if current_state == 'admin_auth_wait_new_value':
             umo = event.unified_msg_origin
             if text in ['无限制', '无限', 'unlimited']:
@@ -1472,7 +1372,6 @@ class KuwoManagerPlugin(Star):
             else:
                 yield event.plain_result("❌ 输入无效，请输入数字或 '无限制'")
             return
-
         if current_state == 'admin_delete_wait_confirm':
             umo = event.unified_msg_origin
             if text.lower() == 'y':
@@ -1499,7 +1398,7 @@ class KuwoManagerPlugin(Star):
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
 
-    # ---------- 管理员子操作 ----------
+    # ---------- 管理员辅助方法 ----------
     async def _admin_view_all_bindings(self) -> str:
         if not self.cache:
             return "📭 暂无任何用户绑定数据"
@@ -1529,7 +1428,6 @@ class KuwoManagerPlugin(Star):
         for qq, data in self.cache.items():
             for acc in data.get("accounts", []):
                 phone_to_qq[acc["phone"]] = qq
-
         msg = "📋 环境变量账号列表（含未绑定QQ）\n\n"
         for entry in env_entries:
             phone = entry["phone"]
@@ -1553,7 +1451,6 @@ class KuwoManagerPlugin(Star):
             return
         if info['state'] != 'admin_bind_wait_phone_select':
             return
-
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号，请先让用户提交账号或手动添加")
@@ -1563,7 +1460,6 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
-
         bound_phones = set()
         for qq, data in self.cache.items():
             for acc in data.get("accounts", []):
@@ -1577,7 +1473,6 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
-
         msg = "📋 未绑定的手机号列表：\n"
         for idx, entry in enumerate(unbound_phones, 1):
             auth_display = "无限制" if entry["auth_count"] is None else str(entry["auth_count"])
@@ -1615,7 +1510,6 @@ class KuwoManagerPlugin(Star):
         if idx < 1 or idx > len(unbound_phones):
             yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(unbound_phones)} 之间的数字")
             return
-
         selected_phone = unbound_phones[idx-1]["phone"]
         qq_list = list(self.cache.keys())
         umo = event.unified_msg_origin
@@ -1644,7 +1538,6 @@ class KuwoManagerPlugin(Star):
         tmp = info.get('tmp_data', {})
         selected_phone = tmp.get('selected_phone')
         qq_list = tmp.get('qq_list', [])
-
         if current_text.isdigit():
             if len(current_text) <= 5:
                 idx = int(current_text)
@@ -1656,7 +1549,6 @@ class KuwoManagerPlugin(Star):
                 target_qq = current_text
         else:
             return "❌ 请输入数字（序号或新QQ号）"
-
         result = await self._admin_do_bind(target_qq, selected_phone)
         umo = event.unified_msg_origin
         self._set_state(user_id, 'admin_menu_idle', admin_mode=True, in_menu=True, umo=umo)
@@ -1720,7 +1612,6 @@ class KuwoManagerPlugin(Star):
             return
         if info['state'] != 'admin_unbind_wait_select':
             return
-
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
@@ -1730,12 +1621,10 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
-
         phone_to_qq = {}
         for qq, data in self.cache.items():
             for acc in data.get("accounts", []):
                 phone_to_qq[acc["phone"]] = qq
-
         bound_list = []
         for entry in env_entries:
             phone = entry["phone"]
@@ -1745,7 +1634,6 @@ class KuwoManagerPlugin(Star):
                     "auth_count": entry["auth_count"],
                     "qq": phone_to_qq[phone]
                 })
-
         if not bound_list:
             yield event.plain_result("✅ 没有已绑定的账号需要解除")
             umo = event.unified_msg_origin
@@ -1754,7 +1642,6 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_admin_menu_text()
             yield event.plain_result(menu)
             return
-
         msg = "📋 已绑定的账号列表（解除绑定将保留环境变量）：\n"
         for idx, item in enumerate(bound_list, 1):
             auth_display = "无限制" if item["auth_count"] is None else str(item["auth_count"])
@@ -1795,7 +1682,6 @@ class KuwoManagerPlugin(Star):
         item = bound_list[idx-1]
         phone = item["phone"]
         qq = item["qq"]
-
         cache_user = self._get_cache_user(qq)
         accounts = cache_user["accounts"]
         new_accounts = [acc for acc in accounts if acc["phone"] != phone]
@@ -1830,7 +1716,6 @@ class KuwoManagerPlugin(Star):
             return
         if info['state'] != 'admin_delete_wait_select':
             return
-
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
@@ -1925,7 +1810,6 @@ class KuwoManagerPlugin(Star):
             return
         if info['state'] != 'admin_auth_wait_select':
             return
-
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
@@ -1993,7 +1877,6 @@ class KuwoManagerPlugin(Star):
             return
         if info['state'] != 'admin_withdraw_wait_select':
             return
-
         env_entries = await self._get_all_env_entries()
         if not env_entries:
             yield event.plain_result("❌ 环境变量中暂无账号")
@@ -2073,7 +1956,6 @@ class KuwoManagerPlugin(Star):
             info['admin_mode'] = False
             self._cancel_timeout(user_id)
             return
-
         if info['state'] != 'admin_withdraw_wait_amount' or not info.get('in_menu', False):
             return
         current_text = self._get_text(event)
@@ -2136,7 +2018,6 @@ class KuwoManagerPlugin(Star):
             return
         if info['state'] != 'admin_reset_wait_select':
             return
-
         qq_list = [qq for qq, data in self.cache.items() if data.get("accounts")]
         if not qq_list:
             yield event.plain_result("📭 暂无任何用户绑定数据")
