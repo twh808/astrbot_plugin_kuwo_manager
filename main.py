@@ -285,7 +285,7 @@ def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'
 
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 最终优化版（缓存10分钟 + 预加载）"""
+    """酷我账号管理 - TTL=600秒 + 异步刷新"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -311,15 +311,15 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        # ---------- 环境变量缓存（10分钟） ----------
+        # ---------- 环境变量缓存（TTL=600秒） ----------
         self._env_cache = None
         self._env_cache_time = 0
-        self._env_cache_ttl = 600  # 10分钟，极大减少API请求
+        self._env_cache_ttl = 600  # 10分钟
 
         # 预加载环境变量
         asyncio.create_task(self._preload_env())
 
-        logger.info("✅ 酷我插件（最终优化版）已加载")
+        logger.info("✅ 酷我插件（TTL=600s）已加载")
 
     # ---------- 预加载 ----------
     async def _preload_env(self):
@@ -399,7 +399,6 @@ class KuwoManagerPlugin(Star):
         return result.get("data", [])
 
     async def _get_env_id_by_name(self, env_name: str) -> int:
-        # 保留此方法以兼容可能的外部调用，但不再内部使用
         envs = await self._fetch_env_list()
         for env in envs:
             if env.get("name") == env_name:
