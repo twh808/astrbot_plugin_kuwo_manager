@@ -306,20 +306,35 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        # 环境变量缓存（TTL=300秒，无后台刷新）
-        self._env_cache = None
-        self._env_cache_time = 0
-        self._env_cache_ttl = 300
+        # ---------- 统一环境变量列表缓存 ----------
+        self._envs_cache = None          # 完整的 envs 列表
+        self._envs_cache_time = 0
+        self._envs_cache_ttl = 600       # 10分钟
 
-        # CODE 环境变量缓存（TTL=10秒）
-        self._code_env_cache = None
-        self._code_env_cache_time = 0
+        # ---------- kwtx 缓存 ----------
+        self._kwtx_cache = None
+        self._kwtx_cache_time = 0
+        self._kwtx_cache_ttl = 600
 
-        # env_id 缓存（TTL=60秒）
-        self._env_id_cache = {}
-        self._env_id_cache_time = 0
+        # ---------- CODE 缓存 ----------
+        self._code_cache = None          # CODE 环境变量的值
+        self._code_cache_time = 0
+        self._code_cache_ttl = 300       # 5分钟
+        self._code_env_id = None         # CODE 的 env_id（永久缓存，更新时刷新）
 
-        logger.info("✅ 酷我插件（带耗时日志）已加载")
+        # 预加载
+        asyncio.create_task(self._preload())
+
+        logger.info("✅ 酷我插件（静默优化版）已加载")
+
+    async def _preload(self):
+        """启动时预加载 kwtx 和 CODE"""
+        try:
+            await self._get_all_env_entries()
+            await self._get_code_env_value()
+            logger.info("✅ 预加载完成")
+        except Exception as e:
+            logger.warning(f"预加载失败: {e}")
 
     # ---------- 辅助：耗时日志 ----------
     async def _log_time(self, operation: str, start: float):
@@ -401,47 +416,58 @@ class KuwoManagerPlugin(Star):
                     await self._log_time(f"API调用 {endpoint}（异常）", start)
                     return {"error": f"HTTP {resp.status}", "detail": await resp.text()}
 
+    # ---------- 环境变量列表缓存 ----------
     async def _fetch_env_list(self):
         start = time.time()
+        now = time.time()
+        if self._envs_cache is not None and (now - self._envs_cache_time) < self._envs_cache_ttl:
+            await self._log_time("获取环境变量列表（缓存命中）", start)
+            return self._envs_cache
         result = await self._call_api("envs?page=1&page_size=100", method="GET")
-        await self._log_time("获取环境变量列表", start)
-        return result.get("data", [])
+        data = result.get("data", [])
+        self._envs_cache = data
+        self._envs_cache_time = now
+        await self._log_time("获取环境变量列表（网络）", start)
+        return data
 
     async def _get_env_id_by_name(self, env_name: str) -> int:
-        start = time.time()
-        now = time.time()
-        if (now - self._env_id_cache_time) > 60:
-            envs = await self._fetch_env_list()
-            self._env_id_cache = {}
-            for env in envs:
-                self._env_id_cache[env.get("name")] = env.get("id")
-            self._env_id_cache_time = now
-        result = self._env_id_cache.get(env_name)
-        await self._log_time(f"获取env_id {env_name}", start)
-        return result
+        # 直接使用缓存的 envs 列表查找
+        envs = await self._fetch_env_list()
+        for env in envs:
+            if env.get("name") == env_name:
+                return env.get("id")
+        return None
 
-    async def _update_env_value(self, env_name: str, new_value: str) -> bool:
+    # ---------- 更新环境变量 ----------
+    async def _update_env_value(self, env_name: str, new_value: str, env_id: int = None) -> bool:
         start = time.time()
-        env_id = await self._get_env_id_by_name(env_name)
+        if env_id is None:
+            env_id = await self._get_env_id_by_name(env_name)
         if env_id is None:
             payload = {"name": env_name, "value": new_value, "group": "默认分组"}
             result = await self._call_api("envs", method="POST", data=payload)
+            # 新建后，清除环境变量列表缓存
+            self._envs_cache = None
+            self._envs_cache_time = 0
         else:
             payload = {"name": env_name, "value": new_value}
             result = await self._call_api(f"envs/{env_id}", method="PUT", data=payload)
-        # 如果更新的是 CODE，清除 CODE 缓存
+        # 如果更新的是 CODE，清除 CODE 缓存并刷新 code_env_id
         if env_name == self.code_env_name:
-            self._code_env_cache = None
-            self._code_env_cache_time = 0
+            self._code_cache = None
+            self._code_cache_time = 0
+            if env_id is None and result.get("data") and result["data"].get("id"):
+                self._code_env_id = result["data"]["id"]
         await self._log_time(f"更新环境变量 {env_name}", start)
         return result.get("code") in [0, None, ""] and not result.get("error")
 
+    # ---------- kwtx 相关 ----------
     async def _get_all_env_entries(self) -> list:
         start = time.time()
         now = time.time()
-        if self._env_cache is not None and (now - self._env_cache_time) < self._env_cache_ttl:
+        if self._kwtx_cache is not None and (now - self._kwtx_cache_time) < self._kwtx_cache_ttl:
             await self._log_time("读取kwtx（缓存命中）", start)
-            return self._env_cache
+            return self._kwtx_cache
         envs = await self._fetch_env_list()
         value = ""
         for env in envs:
@@ -468,9 +494,9 @@ class KuwoManagerPlugin(Star):
                         except:
                             auth_count = None
                     entries.append({"phone": phone, "password": password, "auth_count": auth_count})
-        self._env_cache = entries
-        self._env_cache_time = now
-        await self._log_time("读取kwtx（缓存未命中，网络请求）", start)
+        self._kwtx_cache = entries
+        self._kwtx_cache_time = now
+        await self._log_time("读取kwtx（缓存未命中，网络）", start)
         return entries
 
     async def _save_all_env_entries(self, entries: list) -> bool:
@@ -485,30 +511,34 @@ class KuwoManagerPlugin(Star):
                 else:
                     lines.append(f"{e['phone']}#{e['password']}#{e['auth_count']}")
             new_value = '\n'.join(lines)
-        result = await self._update_env_value(self.env_name, new_value)
+        env_id = await self._get_env_id_by_name(self.env_name)
+        result = await self._update_env_value(self.env_name, new_value, env_id)
         if result:
-            self._env_cache = entries
-            self._env_cache_time = time.time()
+            self._kwtx_cache = entries
+            self._kwtx_cache_time = time.time()
         await self._log_time("保存kwtx", start)
         return result
 
+    # ---------- CODE 相关 ----------
     async def _get_code_env_value(self) -> str:
         start = time.time()
         now = time.time()
-        if self._code_env_cache is not None and (now - self._code_env_cache_time) < 10:
+        if self._code_cache is not None and (now - self._code_cache_time) < self._code_cache_ttl:
             await self._log_time("读取CODE（缓存命中）", start)
-            return self._code_env_cache
+            return self._code_cache
+        envs = await self._fetch_env_list()
         value = ""
-        env_id = await self._get_env_id_by_name(self.code_env_name)
-        if env_id:
-            envs = await self._fetch_env_list()
-            for env in envs:
-                if env.get("id") == env_id:
-                    value = env.get("value", "")
-                    break
-        self._code_env_cache = value
-        self._code_env_cache_time = now
-        await self._log_time("读取CODE（网络请求）", start)
+        code_id = None
+        for env in envs:
+            if env.get("name") == self.code_env_name:
+                value = env.get("value", "")
+                code_id = env.get("id")
+                break
+        if code_id is not None:
+            self._code_env_id = code_id
+        self._code_cache = value
+        self._code_cache_time = now
+        await self._log_time("读取CODE（缓存未命中，网络）", start)
         return value
 
     async def _update_code_env(self, phone: str, code: str) -> bool:
@@ -531,10 +561,14 @@ class KuwoManagerPlugin(Star):
         if not found:
             new_lines.append(f"{phone}#{code}")
         new_value = '\n'.join(new_lines)
-        result = await self._update_env_value(self.code_env_name, new_value)
+        result = await self._update_env_value(self.code_env_name, new_value, self._code_env_id)
+        if not result and self._code_env_id is not None:
+            self._code_env_id = None
+            result = await self._update_env_value(self.code_env_name, new_value, None)
         await self._log_time("更新CODE", start)
         return result
 
+    # ---------- 其他业务方法 ----------
     async def _get_my_accounts(self, user_id: str) -> list:
         return self._get_cache_user(user_id)["accounts"]
 
@@ -952,7 +986,7 @@ class KuwoManagerPlugin(Star):
                 menu = await self._get_menu_text(user_id)
                 yield event.plain_result(menu)
                 return
-        yield event.plain_result(f"⏳ 正在为 {len(phones)} 个账号发送验证码，请稍候...")
+        # 静默执行，不发送“正在发送…”提示
         try:
             result = await asyncio.to_thread(self._sync_send_codes, phones)
             yield event.plain_result(result)
@@ -1347,7 +1381,7 @@ class KuwoManagerPlugin(Star):
                 if text.lower() == 'y':
                     phones = info.get('tmp_data', {}).get('phones', [])
                     if phones:
-                        yield event.plain_result("⏳ 正在发送验证码，请稍候...")
+                        # 静默执行，不发送“正在发送…”
                         try:
                             result = await asyncio.to_thread(self._sync_send_codes, phones)
                             yield event.plain_result(result)
@@ -1444,7 +1478,7 @@ class KuwoManagerPlugin(Star):
                 menu = await self._get_admin_menu_text()
                 yield event.plain_result(menu)
 
-    # ---------- 管理员辅助方法（略，与之前相同） ----------
+    # ---------- 管理员辅助方法 ----------
     async def _admin_view_all_bindings(self) -> str:
         if not self.cache:
             return "📭 暂无任何用户绑定数据"
@@ -1482,7 +1516,6 @@ class KuwoManagerPlugin(Star):
             msg += f"📱 {phone} ｜ 授权: {auth_display} ｜ 绑定QQ: {qq}\n"
         return msg
 
-    # 以下为管理员子操作（未改动，略）
     async def _admin_bind_select_phone(self, event):
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
