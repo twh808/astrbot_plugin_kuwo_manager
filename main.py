@@ -18,7 +18,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
-# ---------- 酷我验证码发送核心函数 ----------
+# ---------- 常量 ----------
 SIGN_BASE = 'https://integralapi.kuwo.cn/api/v1/online/sign'
 URL_USER_ASSET = SIGN_BASE + '/v1/earningSignIn/earningUserSignList'
 URL_NEW_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/newDoListen'
@@ -306,29 +306,25 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        # ---------- 统一环境变量列表缓存 ----------
-        self._envs_cache = None          # 完整的 envs 列表
+        # ---------- 缓存 ----------
+        self._envs_cache = None
         self._envs_cache_time = 0
-        self._envs_cache_ttl = 600       # 10分钟
-
-        # ---------- kwtx 缓存 ----------
+        self._envs_cache_ttl = 600
         self._kwtx_cache = None
         self._kwtx_cache_time = 0
         self._kwtx_cache_ttl = 600
-
-        # ---------- CODE 缓存 ----------
-        self._code_cache = None          # CODE 环境变量的值
+        self._code_cache = None
         self._code_cache_time = 0
-        self._code_cache_ttl = 300       # 5分钟
-        self._code_env_id = None         # CODE 的 env_id（永久缓存，更新时刷新）
+        self._code_cache_ttl = 600
+        self._code_env_id = None
 
-        # 预加载
+        # 后台任务跟踪
+        self._update_tasks = {}
+
         asyncio.create_task(self._preload())
-
-        logger.info("✅ 酷我插件（静默优化版）已加载")
+        logger.info("✅ 酷我插件（异步更新优化版）已加载")
 
     async def _preload(self):
-        """启动时预加载 kwtx 和 CODE"""
         try:
             await self._get_all_env_entries()
             await self._get_code_env_value()
@@ -336,7 +332,6 @@ class KuwoManagerPlugin(Star):
         except Exception as e:
             logger.warning(f"预加载失败: {e}")
 
-    # ---------- 辅助：耗时日志 ----------
     async def _log_time(self, operation: str, start: float):
         elapsed = (time.time() - start) * 1000
         logger.info(f"⏱️ {operation} 耗时: {elapsed:.1f}ms")
@@ -345,7 +340,6 @@ class KuwoManagerPlugin(Star):
         elapsed = (time.time() - start) * 1000
         logger.info(f"⏱️ {operation} 耗时: {elapsed:.1f}ms")
 
-    # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
         if os.path.exists(self.cache_file):
             try:
@@ -372,7 +366,6 @@ class KuwoManagerPlugin(Star):
         self.cache[user_id] = {"accounts": accounts}
         self._save_cache()
 
-    # ---------- 呆呆面板 API ----------
     async def _get_token(self):
         start = time.time()
         if self.token and self.token_expiry > time.time():
@@ -416,7 +409,6 @@ class KuwoManagerPlugin(Star):
                     await self._log_time(f"API调用 {endpoint}（异常）", start)
                     return {"error": f"HTTP {resp.status}", "detail": await resp.text()}
 
-    # ---------- 环境变量列表缓存 ----------
     async def _fetch_env_list(self):
         start = time.time()
         now = time.time()
@@ -431,14 +423,12 @@ class KuwoManagerPlugin(Star):
         return data
 
     async def _get_env_id_by_name(self, env_name: str) -> int:
-        # 直接使用缓存的 envs 列表查找
         envs = await self._fetch_env_list()
         for env in envs:
             if env.get("name") == env_name:
                 return env.get("id")
         return None
 
-    # ---------- 更新环境变量 ----------
     async def _update_env_value(self, env_name: str, new_value: str, env_id: int = None) -> bool:
         start = time.time()
         if env_id is None:
@@ -446,13 +436,11 @@ class KuwoManagerPlugin(Star):
         if env_id is None:
             payload = {"name": env_name, "value": new_value, "group": "默认分组"}
             result = await self._call_api("envs", method="POST", data=payload)
-            # 新建后，清除环境变量列表缓存
             self._envs_cache = None
             self._envs_cache_time = 0
         else:
             payload = {"name": env_name, "value": new_value}
             result = await self._call_api(f"envs/{env_id}", method="PUT", data=payload)
-        # 如果更新的是 CODE，清除 CODE 缓存并刷新 code_env_id
         if env_name == self.code_env_name:
             self._code_cache = None
             self._code_cache_time = 0
@@ -461,7 +449,6 @@ class KuwoManagerPlugin(Star):
         await self._log_time(f"更新环境变量 {env_name}", start)
         return result.get("code") in [0, None, ""] and not result.get("error")
 
-    # ---------- kwtx 相关 ----------
     async def _get_all_env_entries(self) -> list:
         start = time.time()
         now = time.time()
@@ -519,7 +506,6 @@ class KuwoManagerPlugin(Star):
         await self._log_time("保存kwtx", start)
         return result
 
-    # ---------- CODE 相关 ----------
     async def _get_code_env_value(self) -> str:
         start = time.time()
         now = time.time()
@@ -541,34 +527,51 @@ class KuwoManagerPlugin(Star):
         await self._log_time("读取CODE（缓存未命中，网络）", start)
         return value
 
-    async def _update_code_env(self, phone: str, code: str) -> bool:
-        start = time.time()
-        current = await self._get_code_env_value()
-        lines = current.split('\n') if current else []
-        lines = [line.strip() for line in lines if line.strip()]
-        found = False
-        new_lines = []
-        for line in lines:
-            if '#' in line:
-                p, c = line.split('#', 1)
-                if p.strip() == phone:
-                    new_lines.append(f"{phone}#{code}")
-                    found = True
+    async def _update_code_env(self, phone: str, code: str, umo: str) -> bool:
+        if phone in self._update_tasks:
+            self._update_tasks[phone].cancel()
+        task = asyncio.create_task(self._async_update_code(phone, code, umo))
+        self._update_tasks[phone] = task
+        return True
+
+    async def _async_update_code(self, phone: str, code: str, umo: str):
+        try:
+            start = time.time()
+            current = await self._get_code_env_value()
+            lines = current.split('\n') if current else []
+            lines = [line.strip() for line in lines if line.strip()]
+            found = False
+            new_lines = []
+            for line in lines:
+                if '#' in line:
+                    p, c = line.split('#', 1)
+                    if p.strip() == phone:
+                        new_lines.append(f"{phone}#{code}")
+                        found = True
+                    else:
+                        new_lines.append(line)
                 else:
                     new_lines.append(line)
-            else:
-                new_lines.append(line)
-        if not found:
-            new_lines.append(f"{phone}#{code}")
-        new_value = '\n'.join(new_lines)
-        result = await self._update_env_value(self.code_env_name, new_value, self._code_env_id)
-        if not result and self._code_env_id is not None:
-            self._code_env_id = None
-            result = await self._update_env_value(self.code_env_name, new_value, None)
-        await self._log_time("更新CODE", start)
-        return result
+            if not found:
+                new_lines.append(f"{phone}#{code}")
+            new_value = '\n'.join(new_lines)
+            result = await self._update_env_value(self.code_env_name, new_value, self._code_env_id)
+            if not result and self._code_env_id is not None:
+                self._code_env_id = None
+                result = await self._update_env_value(self.code_env_name, new_value, None)
+            chain = MessageChain().message(f"✅ 验证码已提交：手机号 {phone} -> {code}" if result else f"❌ 验证码提交失败：手机号 {phone}")
+            await self.context.send_message(umo, chain)
+            await self._log_time(f"后台更新CODE（{phone}）", start)
+        except asyncio.CancelledError:
+            logger.info(f"后台更新任务被取消: {phone}")
+        except Exception as e:
+            logger.error(f"后台更新异常: {e}")
+            try:
+                chain = MessageChain().message(f"❌ 验证码提交异常：{phone} - {str(e)}")
+                await self.context.send_message(umo, chain)
+            except:
+                pass
 
-    # ---------- 其他业务方法 ----------
     async def _get_my_accounts(self, user_id: str) -> list:
         return self._get_cache_user(user_id)["accounts"]
 
@@ -986,7 +989,6 @@ class KuwoManagerPlugin(Star):
                 menu = await self._get_menu_text(user_id)
                 yield event.plain_result(menu)
                 return
-        # 静默执行，不发送“正在发送…”提示
         try:
             result = await asyncio.to_thread(self._sync_send_codes, phones)
             yield event.plain_result(result)
@@ -1030,12 +1032,11 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
             return
+        umo = event.unified_msg_origin
+        yield event.plain_result("⏳ 正在提交验证码，请稍候...")
+        await self._update_code_env(phone, code, umo)
         self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
         self._cancel_timeout(user_id)
-        if await self._update_code_env(phone, code):
-            yield event.plain_result(f"✅ 验证码已提交：手机号 {phone} -> {code}")
-        else:
-            yield event.plain_result("❌ 提交验证码失败，请稍后重试")
         umo = event.unified_msg_origin
         self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
         self._schedule_timeout(user_id)
@@ -1381,7 +1382,6 @@ class KuwoManagerPlugin(Star):
                 if text.lower() == 'y':
                     phones = info.get('tmp_data', {}).get('phones', [])
                     if phones:
-                        # 静默执行，不发送“正在发送…”
                         try:
                             result = await asyncio.to_thread(self._sync_send_codes, phones)
                             yield event.plain_result(result)
