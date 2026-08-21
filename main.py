@@ -285,7 +285,7 @@ def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'
 
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 完整优化版"""
+    """酷我账号管理 - 最终优化版（缓存10分钟 + 预加载）"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -311,12 +311,24 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
-        # ---------- 环境变量缓存（延长至 60 秒） ----------
+        # ---------- 环境变量缓存（10分钟） ----------
         self._env_cache = None
         self._env_cache_time = 0
-        self._env_cache_ttl = 60   # 缓存 60 秒，大幅减少 API 请求
+        self._env_cache_ttl = 600  # 10分钟，极大减少API请求
 
-        logger.info("✅ 酷我插件（优化缓存版）已加载")
+        # 预加载环境变量
+        asyncio.create_task(self._preload_env())
+
+        logger.info("✅ 酷我插件（最终优化版）已加载")
+
+    # ---------- 预加载 ----------
+    async def _preload_env(self):
+        """后台预加载环境变量，不阻塞启动"""
+        try:
+            await self._get_all_env_entries()
+            logger.info("✅ 环境变量预加载完成")
+        except Exception as e:
+            logger.warning(f"环境变量预加载失败: {e}")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -387,6 +399,7 @@ class KuwoManagerPlugin(Star):
         return result.get("data", [])
 
     async def _get_env_id_by_name(self, env_name: str) -> int:
+        # 保留此方法以兼容可能的外部调用，但不再内部使用
         envs = await self._fetch_env_list()
         for env in envs:
             if env.get("name") == env_name:
@@ -410,15 +423,13 @@ class KuwoManagerPlugin(Star):
         if self._env_cache is not None and (now - self._env_cache_time) < self._env_cache_ttl:
             return self._env_cache
 
-        # 缓存失效，重新获取
+        # 缓存失效，重新获取（合并请求，只需一次）
+        envs = await self._fetch_env_list()
         value = ""
-        env_id = await self._get_env_id_by_name(self.env_name)
-        if env_id:
-            envs = await self._fetch_env_list()
-            for env in envs:
-                if env.get("id") == env_id:
-                    value = env.get("value", "")
-                    break
+        for env in envs:
+            if env.get("name") == self.env_name:
+                value = env.get("value", "")
+                break
 
         if not value:
             entries = []
