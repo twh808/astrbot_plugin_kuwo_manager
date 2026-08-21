@@ -285,7 +285,7 @@ def send_code_once(loginUid, loginSid, appUid, encrypted_phone, quota_id='60004'
 
 
 class KuwoManagerPlugin(Star):
-    """酷我账号管理 - 完整版（已修复触发消息重复处理）"""
+    """酷我账号管理 - 完整优化版"""
 
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -311,11 +311,12 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
+        # ---------- 环境变量缓存（延长至 60 秒） ----------
         self._env_cache = None
         self._env_cache_time = 0
-        self._env_cache_ttl = 5
+        self._env_cache_ttl = 60   # 缓存 60 秒，大幅减少 API 请求
 
-        logger.info("✅ 酷我插件（完整版）已加载")
+        logger.info("✅ 酷我插件（优化缓存版）已加载")
 
     # ---------- 缓存读写 ----------
     def _load_cache(self) -> dict:
@@ -405,9 +406,11 @@ class KuwoManagerPlugin(Star):
     # ---------- 环境变量读写（kwtx，支持无限制） + 缓存 ----------
     async def _get_all_env_entries(self) -> list:
         now = time.time()
+        # 缓存有效，直接返回
         if self._env_cache is not None and (now - self._env_cache_time) < self._env_cache_ttl:
             return self._env_cache
 
+        # 缓存失效，重新获取
         value = ""
         env_id = await self._get_env_id_by_name(self.env_name)
         if env_id:
@@ -416,6 +419,7 @@ class KuwoManagerPlugin(Star):
                 if env.get("id") == env_id:
                     value = env.get("value", "")
                     break
+
         if not value:
             entries = []
         else:
@@ -436,6 +440,7 @@ class KuwoManagerPlugin(Star):
                         except:
                             auth_count = None
                     entries.append({"phone": phone, "password": password, "auth_count": auth_count})
+
         self._env_cache = entries
         self._env_cache_time = now
         return entries
@@ -855,9 +860,9 @@ class KuwoManagerPlugin(Star):
             lines = [f"{idx+1}. {acc['phone']}" for idx, acc in enumerate(my_acc)]
             prompt = "选择要发送验证码的账号序号（可多选，用逗号分隔，如 1,3），或输入 all 发送全部：\n" + "\n".join(lines) + "\n（发送 q 取消）："
             yield event.plain_result(prompt)
-            self._set_state(user_id, 'waiting_send_select', admin_mode=False, 
-                           tmp_data={'all_phones': [acc['phone'] for acc in my_acc]}, 
-                           in_menu=True, umo=umo, trigger_msg=text)  # 记录触发消息
+            self._set_state(user_id, 'waiting_send_select', admin_mode=False,
+                           tmp_data={'all_phones': [acc['phone'] for acc in my_acc]},
+                           in_menu=True, umo=umo, trigger_msg=text)
             self._schedule_timeout(user_id)
 
         elif text == '5':   # 提交验证码
@@ -906,12 +911,11 @@ class KuwoManagerPlugin(Star):
         all_phones = info.get('tmp_data', {}).get('all_phones', [])
         umo = info.get('umo')
 
-        # ----- 关键修复：忽略触发消息（即刚进入该状态时发送的那条消息） -----
+        # 关键：忽略触发消息（即刚进入该状态时发送的那条消息）
         if text == info.get('trigger_msg'):
-            # 忽略，不做任何响应，防止误处理
             return
 
-        # ----- 返回菜单：支持 q, x, 取消, back, -1, 返回 -----
+        # 返回菜单
         if text in ['q', 'x', '取消', 'back', '-1', '返回']:
             yield event.plain_result("👋 已返回菜单。")
             self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
@@ -920,22 +924,20 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(menu)
             return
 
-        # ----- 全选：all 或 0 -----
+        # 全选：all 或 0
         if text == 'all' or text == '0':
             phones = all_phones
         else:
-            # ----- 解析逗号分隔的序号 -----
+            # 解析逗号分隔的序号
             try:
                 indices = [int(x.strip()) for x in text.split(',') if x.strip().isdigit()]
             except ValueError:
                 yield event.plain_result("❌ 输入格式错误，请使用逗号分隔数字（如 1,3）。")
-                # 重新显示选择提示
                 lines = [f"{idx+1}. {phone}" for idx, phone in enumerate(all_phones)]
                 prompt = "选择要发送验证码的账号序号（可多选，用逗号分隔，如 1,3），输入 0/all 发送全部：\n" + "\n".join(lines) + "\n（输入 -1/back/q/取消 返回菜单）："
                 yield event.plain_result(prompt)
                 return
 
-            # 检查是否有无效序号
             phones = []
             invalid_indices = []
             for idx in indices:
@@ -946,7 +948,6 @@ class KuwoManagerPlugin(Star):
 
             if invalid_indices:
                 yield event.plain_result(f"❌ 序号 {', '.join(invalid_indices)} 无效，有效范围 1-{len(all_phones)}。")
-                # 重新显示选择提示
                 lines = [f"{idx+1}. {phone}" for idx, phone in enumerate(all_phones)]
                 prompt = "选择要发送验证码的账号序号（可多选，用逗号分隔，如 1,3），输入 0/all 发送全部：\n" + "\n".join(lines) + "\n（输入 -1/back/q/取消 返回菜单）："
                 yield event.plain_result(prompt)
@@ -960,7 +961,7 @@ class KuwoManagerPlugin(Star):
                 yield event.plain_result(menu)
                 return
 
-        # ----- 执行发送 -----
+        # 执行发送
         yield event.plain_result(f"⏳ 正在为 {len(phones)} 个账号发送验证码，请稍候...")
         try:
             result = await asyncio.to_thread(self._sync_send_codes, phones)
