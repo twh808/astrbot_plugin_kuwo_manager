@@ -319,7 +319,7 @@ class KuwoManagerPlugin(Star):
         self._code_env_id = None
 
         asyncio.create_task(self._preload())
-        logger.info("✅ 酷我插件（同步更新版）已加载")
+        logger.info("✅ 酷我插件（修复覆盖问题）已加载")
 
     async def _preload(self):
         try:
@@ -426,6 +426,7 @@ class KuwoManagerPlugin(Star):
                 return env.get("id")
         return None
 
+    # ---------- 关键修复：更新后清除 envs 缓存 ----------
     async def _update_env_value(self, env_name: str, new_value: str, env_id: int = None) -> bool:
         start = time.time()
         if env_id is None:
@@ -441,6 +442,8 @@ class KuwoManagerPlugin(Star):
         if env_name == self.code_env_name:
             self._code_cache = None
             self._code_cache_time = 0
+            self._envs_cache = None          # 关键修复：清除 envs 缓存
+            self._envs_cache_time = 0
             if env_id is None and result.get("data") and result["data"].get("id"):
                 self._code_env_id = result["data"]["id"]
         await self._log_time(f"更新环境变量 {env_name}", start)
