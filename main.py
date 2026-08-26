@@ -336,6 +336,10 @@ class KuwoManagerPlugin(Star):
         self.TIMEOUT = 120
         self.timeout_tasks = {}
 
+        # ---------- 通知记录 ----------
+        self.notify_file = os.path.join(self.data_dir, "auth_notify_cache.json")
+        self._notified_phones = self._load_notified_phones()
+
         # ---------- 缓存 ----------
         self._envs_cache = None
         self._envs_cache_time = 0
@@ -349,7 +353,23 @@ class KuwoManagerPlugin(Star):
         self._code_env_id = None
 
         asyncio.create_task(self._preload())
-        logger.info("✅ 酷我插件（默认授权0）已加载")
+        logger.info("✅ 酷我插件（授权提醒版）已加载")
+
+    def _load_notified_phones(self) -> set:
+        if os.path.exists(self.notify_file):
+            try:
+                with open(self.notify_file, 'r', encoding='utf-8') as f:
+                    return set(json.load(f))
+            except:
+                return set()
+        return set()
+
+    def _save_notified_phones(self):
+        try:
+            with open(self.notify_file, 'w', encoding='utf-8') as f:
+                json.dump(list(self._notified_phones), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存通知记录失败: {e}")
 
     async def _preload(self):
         try:
@@ -556,10 +576,10 @@ class KuwoManagerPlugin(Star):
         await self._log_time("读取CODE（缓存未命中，网络）", start)
         return value
 
-    async def _update_code_env(self, phone: str, code: str) -> bool:
-        return await self._sync_update_code(phone, code)
+    async def _update_code_env(self, phone: str, code: str, umo: str) -> bool:
+        return await self._sync_update_code(phone, code, umo)
 
-    async def _sync_update_code(self, phone: str, code: str) -> bool:
+    async def _sync_update_code(self, phone: str, code: str, umo: str) -> bool:
         try:
             start = time.time()
             current = await self._get_code_env_value()
@@ -585,10 +605,42 @@ class KuwoManagerPlugin(Star):
                 self._code_env_id = None
                 result = await self._update_env_value(self.code_env_name, new_value, None)
             await self._log_time(f"更新CODE（{phone}）", start)
+            if result:
+                # 异步检查授权次数
+                asyncio.create_task(self._check_and_notify_auth_limit(phone, umo))
             return result
         except Exception as e:
             logger.error(f"更新验证码异常: {e}")
             return False
+
+    async def _check_and_notify_auth_limit(self, phone: str, umo: str):
+        """检查手机号授权次数是否用完，若用完且未通知则发送提醒"""
+        env_entries = await self._get_all_env_entries()
+        auth_limit = None
+        password = None
+        for entry in env_entries:
+            if entry["phone"] == phone:
+                auth_limit = entry.get("auth_count")
+                password = entry.get("password")
+                break
+        if auth_limit is None or not password:
+            return
+        login_result = login_kuwo(phone, password)
+        if not login_result:
+            return
+        loginUid, loginSid, _, _ = login_result
+        total_withdraw = get_withdraw_total(loginUid, loginSid)
+        if total_withdraw >= auth_limit:
+            if phone in self._notified_phones:
+                return
+            chain = MessageChain().message(f"⚠️ 手机号 {phone} 的授权次数已用完（{total_withdraw}/{auth_limit}），请及时补充。")
+            try:
+                await self.context.send_message(umo, chain)
+                self._notified_phones.add(phone)
+                self._save_notified_phones()
+                logger.info(f"已发送授权用完提醒: {phone}")
+            except Exception as e:
+                logger.error(f"发送授权提醒失败: {e}")
 
     async def _get_my_accounts(self, user_id: str) -> list:
         return self._get_cache_user(user_id)["accounts"]
@@ -1050,8 +1102,9 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
             return
-        # 同步执行更新
-        success = await self._update_code_env(phone, code)
+        umo = event.unified_msg_origin
+        # 同步执行更新，传入 umo
+        success = await self._update_code_env(phone, code, umo)
         if success:
             yield event.plain_result(f"✅ 验证码已提交：手机号 {phone} -> {code}")
         else:
@@ -1148,11 +1201,10 @@ class KuwoManagerPlugin(Star):
             await self._save_all_env_entries(env_entries)
             yield event.plain_result(f"✅ 账号 {phone} 密码已更新")
         else:
-            # ----- 关键修改：新提交的账号默认授权次数为 0 -----
             my_acc.append({"phone": phone, "password": password})
             self._update_cache_user(user_id, my_acc)
             env_entries = await self._get_all_env_entries()
-            env_entries.append({"phone": phone, "password": password, "auth_count": 0})   # 设为0，而非None
+            env_entries.append({"phone": phone, "password": password, "auth_count": 0})
             await self._save_all_env_entries(env_entries)
             yield event.plain_result(f"✅ 账号 {phone} 已保存（默认授权 0 次）")
         umo = event.unified_msg_origin
