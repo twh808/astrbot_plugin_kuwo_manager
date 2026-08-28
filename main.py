@@ -351,7 +351,7 @@ class KuwoManagerPlugin(Star):
         self._code_env_id = None
 
         asyncio.create_task(self._preload())
-        logger.info("✅ 酷我插件（授权提醒版 + trigger_msg修复）已加载")
+        logger.info("✅ 酷我插件（修复菜单选择误删bug）已加载")
 
     def _load_notified_phones(self) -> set:
         if os.path.exists(self.notify_file):
@@ -902,6 +902,7 @@ class KuwoManagerPlugin(Star):
         menu = await self._get_menu_text(user_id)
         yield event.plain_result(menu)
 
+    # ---------- handle_menu_choice 修复：添加标记防止误删 ----------
     @filter.regex(r'^[1-5rR]$')
     async def handle_menu_choice(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -927,6 +928,7 @@ class KuwoManagerPlugin(Star):
             self._schedule_timeout(user_id)
             yield event.plain_result("请输入手机号#密码（例如：13800138000#mypassword）（发送 q 取消）")
         elif text == '2':
+            setattr(event, '_menu_choice_processed', True)
             my_acc = await self._get_my_accounts(user_id)
             if not my_acc:
                 yield event.plain_result("❌ 您没有绑定任何账号")
@@ -975,6 +977,7 @@ class KuwoManagerPlugin(Star):
             self._set_state(user_id, 'waiting_send_select', admin_mode=False, tmp_data={'all_phones': [acc['phone'] for acc in my_acc]}, in_menu=True, umo=umo, trigger_msg=text)
             self._schedule_timeout(user_id)
         elif text == '5':
+            setattr(event, '_menu_choice_processed', True)
             my_acc = await self._get_my_accounts(user_id)
             if not my_acc:
                 yield event.plain_result("❌ 您没有绑定任何账号，请先提交账号")
@@ -996,7 +999,7 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
 
-    # ---------- 修复后的 handle_send_selection ----------
+    # ---------- handle_send_selection ----------
     @filter.regex(r'^.+$')
     async def handle_send_selection(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -1016,7 +1019,6 @@ class KuwoManagerPlugin(Star):
         text = self._get_text(event).strip().lower()
         all_phones = info.get('tmp_data', {}).get('all_phones', [])
         umo = info.get('umo')
-        # 移除 trigger_msg 判断
         if text in ['q', 'x', '取消', 'back', '-1', '返回']:
             yield event.plain_result("👋 已返回菜单。")
             self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
@@ -1113,9 +1115,11 @@ class KuwoManagerPlugin(Star):
         yield event.plain_result(menu)
         await self._log_time("提交验证码（整体流程）", overall_start)
 
-    # ---------- 修复后的 handle_code_phone_select ----------
+    # ---------- 修复：handle_code_phone_select 添加标记检查 ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
         if info.get('timeout_triggered', False):
@@ -1133,7 +1137,6 @@ class KuwoManagerPlugin(Star):
         if info['state'] != 'waiting_code_phone' or not info.get('in_menu', False):
             return
         current_text = self._get_text(event)
-        # 移除 trigger_msg 判断
         try:
             idx = int(current_text)
         except:
@@ -1149,9 +1152,11 @@ class KuwoManagerPlugin(Star):
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
 
-    # ---------- 修复后的 handle_delete_index ----------
+    # ---------- 修复：handle_delete_index 添加标记检查 ----------
     @filter.regex(r'^\d+$')
     async def handle_delete_index(self, event: AstrMessageEvent):
+        if getattr(event, '_menu_choice_processed', False):
+            return
         user_id = self._get_user_id(event)
         info = self._get_state_info(user_id)
         if info.get('timeout_triggered', False):
@@ -1167,7 +1172,6 @@ class KuwoManagerPlugin(Star):
         if info['state'] != 'waiting_delete' or not info.get('in_menu', False):
             return
         current_text = self._get_text(event)
-        # 移除 trigger_msg 判断
         try:
             idx = int(current_text)
         except:
