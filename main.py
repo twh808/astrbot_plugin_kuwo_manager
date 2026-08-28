@@ -28,7 +28,6 @@ URL_NEW_BOX_LIST = SIGN_BASE + '/new/newBoxList'
 URL_NEW_BOX_FINISH = SIGN_BASE + '/new/newBoxFinish'
 FREEMIUM_SWITCH_URL = 'https://wapi.kuwo.cn/openapi/v1/user/freemium/h5/switches'
 
-# ---------- 静态数组（完整保留） ----------
 static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
 static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
 static_e = [31, 0, 1, 2, 3, 4, -1, -1, 3, 4, 5, 6, 7, 8, -1, -1, 7, 8, 9, 10, 11, 12, -1, -1, 11, 12, 13, 14, 15, 16, -1, -1, 15, 16, 17, 18, 19, 20, -1, -1, 19, 20, 21, 22, 23, 24, -1, -1, 23, 24, 25, 26, 27, 28, -1, -1, 27, 28, 29, 30, 31, 30, -1, -1]
@@ -243,7 +242,6 @@ def check_withdraw_today(loginUid, loginSid):
         return False
 
 def get_withdraw_total(loginUid, loginSid):
-    """获取累计提现总次数（用于授权检查）"""
     url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/withdrawDetails'
     params = {
         'loginUid': loginUid,
@@ -353,7 +351,7 @@ class KuwoManagerPlugin(Star):
         self._code_env_id = None
 
         asyncio.create_task(self._preload())
-        logger.info("✅ 酷我插件（授权提醒版）已加载")
+        logger.info("✅ 酷我插件（授权提醒版 + trigger_msg修复）已加载")
 
     def _load_notified_phones(self) -> set:
         if os.path.exists(self.notify_file):
@@ -606,7 +604,6 @@ class KuwoManagerPlugin(Star):
                 result = await self._update_env_value(self.code_env_name, new_value, None)
             await self._log_time(f"更新CODE（{phone}）", start)
             if result:
-                # 异步检查授权次数
                 asyncio.create_task(self._check_and_notify_auth_limit(phone, umo))
             return result
         except Exception as e:
@@ -614,7 +611,6 @@ class KuwoManagerPlugin(Star):
             return False
 
     async def _check_and_notify_auth_limit(self, phone: str, umo: str):
-        """检查手机号授权次数是否用完，若用完且未通知则发送提醒"""
         env_entries = await self._get_all_env_entries()
         auth_limit = None
         password = None
@@ -1000,6 +996,7 @@ class KuwoManagerPlugin(Star):
             menu = await self._get_menu_text(user_id)
             yield event.plain_result(menu)
 
+    # ---------- 修复后的 handle_send_selection ----------
     @filter.regex(r'^.+$')
     async def handle_send_selection(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -1019,8 +1016,7 @@ class KuwoManagerPlugin(Star):
         text = self._get_text(event).strip().lower()
         all_phones = info.get('tmp_data', {}).get('all_phones', [])
         umo = info.get('umo')
-        if text == info.get('trigger_msg'):
-            return
+        # 移除 trigger_msg 判断
         if text in ['q', 'x', '取消', 'back', '-1', '返回']:
             yield event.plain_result("👋 已返回菜单。")
             self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
@@ -1103,13 +1099,11 @@ class KuwoManagerPlugin(Star):
             yield event.plain_result(menu)
             return
         umo = event.unified_msg_origin
-        # 同步执行更新，传入 umo
         success = await self._update_code_env(phone, code, umo)
         if success:
             yield event.plain_result(f"✅ 验证码已提交：手机号 {phone} -> {code}")
         else:
             yield event.plain_result(f"❌ 验证码提交失败：手机号 {phone}")
-        # 重置状态并返回菜单
         self._set_state(user_id, 'idle', admin_mode=False, in_menu=False)
         self._cancel_timeout(user_id)
         umo = event.unified_msg_origin
@@ -1119,6 +1113,7 @@ class KuwoManagerPlugin(Star):
         yield event.plain_result(menu)
         await self._log_time("提交验证码（整体流程）", overall_start)
 
+    # ---------- 修复后的 handle_code_phone_select ----------
     @filter.regex(r'^\d+$')
     async def handle_code_phone_select(self, event: AstrMessageEvent):
         user_id = self._get_user_id(event)
@@ -1138,8 +1133,7 @@ class KuwoManagerPlugin(Star):
         if info['state'] != 'waiting_code_phone' or not info.get('in_menu', False):
             return
         current_text = self._get_text(event)
-        if info.get('trigger_msg') == current_text:
-            return
+        # 移除 trigger_msg 判断
         try:
             idx = int(current_text)
         except:
@@ -1154,6 +1148,58 @@ class KuwoManagerPlugin(Star):
         self._set_state(user_id, 'waiting_code_input', admin_mode=False, tmp_data={'phone': phone}, in_menu=True, umo=umo)
         self._schedule_timeout(user_id)
         yield event.plain_result(f"已选择账号 {phone}，请输入验证码（发送 q 取消）：")
+
+    # ---------- 修复后的 handle_delete_index ----------
+    @filter.regex(r'^\d+$')
+    async def handle_delete_index(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        info = self._get_state_info(user_id)
+        if info.get('timeout_triggered', False):
+            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
+            info['timeout_triggered'] = False
+            info['state'] = 'idle'
+            info['tmp_data'] = {}
+            info['trigger_msg'] = None
+            info['in_menu'] = False
+            info['admin_mode'] = False
+            self._cancel_timeout(user_id)
+            return
+        if info['state'] != 'waiting_delete' or not info.get('in_menu', False):
+            return
+        current_text = self._get_text(event)
+        # 移除 trigger_msg 判断
+        try:
+            idx = int(current_text)
+        except:
+            yield event.plain_result("❌ 请输入有效的数字")
+            umo = event.unified_msg_origin
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
+            return
+        cache_user = self._get_cache_user(user_id)
+        my_acc = cache_user["accounts"]
+        if idx < 1 or idx > len(my_acc):
+            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(my_acc)} 之间的数字")
+            umo = event.unified_msg_origin
+            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+            self._schedule_timeout(user_id)
+            menu = await self._get_menu_text(user_id)
+            yield event.plain_result(menu)
+            return
+        phone_to_del = my_acc[idx-1]["phone"]
+        del my_acc[idx-1]
+        self._update_cache_user(user_id, my_acc)
+        env_entries = await self._get_all_env_entries()
+        env_entries = [e for e in env_entries if e["phone"] != phone_to_del]
+        await self._save_all_env_entries(env_entries)
+        yield event.plain_result(f"✅ 已删除账号 {phone_to_del}")
+        umo = event.unified_msg_origin
+        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
+        self._schedule_timeout(user_id)
+        menu = await self._get_menu_text(user_id)
+        yield event.plain_result(menu)
 
     @filter.regex(r'^\d{11}#.+$')
     async def handle_phone_submit(self, event: AstrMessageEvent):
@@ -1207,58 +1253,6 @@ class KuwoManagerPlugin(Star):
             env_entries.append({"phone": phone, "password": password, "auth_count": 0})
             await self._save_all_env_entries(env_entries)
             yield event.plain_result(f"✅ 账号 {phone} 已保存（默认授权 0 次）")
-        umo = event.unified_msg_origin
-        self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
-        self._schedule_timeout(user_id)
-        menu = await self._get_menu_text(user_id)
-        yield event.plain_result(menu)
-
-    @filter.regex(r'^\d+$')
-    async def handle_delete_index(self, event: AstrMessageEvent):
-        user_id = self._get_user_id(event)
-        info = self._get_state_info(user_id)
-        if info.get('timeout_triggered', False):
-            yield event.plain_result("⏰ 您上次操作已超时，已自动退出。请重新输入命令。")
-            info['timeout_triggered'] = False
-            info['state'] = 'idle'
-            info['tmp_data'] = {}
-            info['trigger_msg'] = None
-            info['in_menu'] = False
-            info['admin_mode'] = False
-            self._cancel_timeout(user_id)
-            return
-        if info['state'] != 'waiting_delete' or not info.get('in_menu', False):
-            return
-        current_text = self._get_text(event)
-        if info.get('trigger_msg') == current_text:
-            return
-        try:
-            idx = int(current_text)
-        except:
-            yield event.plain_result("❌ 请输入有效的数字")
-            umo = event.unified_msg_origin
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
-            self._schedule_timeout(user_id)
-            menu = await self._get_menu_text(user_id)
-            yield event.plain_result(menu)
-            return
-        cache_user = self._get_cache_user(user_id)
-        my_acc = cache_user["accounts"]
-        if idx < 1 or idx > len(my_acc):
-            yield event.plain_result(f"❌ 序号无效，请输入 1 到 {len(my_acc)} 之间的数字")
-            umo = event.unified_msg_origin
-            self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
-            self._schedule_timeout(user_id)
-            menu = await self._get_menu_text(user_id)
-            yield event.plain_result(menu)
-            return
-        phone_to_del = my_acc[idx-1]["phone"]
-        del my_acc[idx-1]
-        self._update_cache_user(user_id, my_acc)
-        env_entries = await self._get_all_env_entries()
-        env_entries = [e for e in env_entries if e["phone"] != phone_to_del]
-        await self._save_all_env_entries(env_entries)
-        yield event.plain_result(f"✅ 已删除账号 {phone_to_del}")
         umo = event.unified_msg_origin
         self._set_state(user_id, 'menu_idle', admin_mode=False, in_menu=True, umo=umo)
         self._schedule_timeout(user_id)
