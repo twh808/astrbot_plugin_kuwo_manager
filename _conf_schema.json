@@ -1,47 +1,26 @@
 {
-    "default_auth_limit": {
-        "description": "每个用户默认的授权次数（提现成功扣减）",
-        "type": "number",
-        "default": 3
-    },
-    "verification_cron": {
-        "description": "定时获取验证码的cron表达式（秒 分 时 日 月 周）",
+    "base_url": {
+        "description": "呆呆面板API地址",
         "type": "string",
-        "default": "12 55 8,12,16,19 * * *"
+        "hint": "例如：http://127.0.0.1:5700/api/v1",
+        "default": "http://127.0.0.1:5700/api/v1"
     },
-    "verification_id": {
-        "description": "提现接口所需的 verificationId",
+    "app_key": {
+        "description": "呆呆面板的AppKey",
         "type": "string",
-        "default": "BVB5cctRxT%252FifPHwGzM9q2c%252BG53szUY8iDipOhkIAb%252FmSy64bK1Od%252FTftF%252F1NrBdTYm7hqnmCc3go8IWpPs80nQ%253D%253D"
+        "hint": "在呆呆面板后台 -> 系统设置 -> OpenAPI 中获取",
+        "default": ""
     },
-    "q36": {
-        "description": "提现接口所需的设备指纹 q36",
+    "app_secret": {
+        "description": "呆呆面板的AppSecret",
         "type": "string",
-        "default": "a9441d902f38da7d2d25bf1f10001a319907"
+        "hint": "在呆呆面板后台 -> 系统设置 -> OpenAPI 中获取",
+        "default": ""
     },
-    "kwtxid": {
-        "description": "提现接口所需的配额ID kwtxid",
+    "admin_qq": {
+        "description": "管理员QQ号（多个用英文逗号分隔）",
         "type": "string",
-        "default": "30002"
-    },
-    "timeout": {
-        "description": "菜单交互无操作超时时间（秒）",
-        "type": "number",
-        "default": 120
-    },
-    "max_retries": {
-        "description": "提现遇到'频繁'错误时的最大重试次数",
-        "type": "number",
-        "default": 3
-    },
-    "retry_delay_ms": {
-        "description": "提现重试间隔时间（毫秒）",
-        "type": "number",
-        "default": 4000
-    },
-    "quota_id": {
-        "description": "发送验证码时使用的配额ID",
-        "type": "string",
-        "default": "60004"
+        "hint": "例如：123456789,987654321",
+        "default": ""
     }
 }
